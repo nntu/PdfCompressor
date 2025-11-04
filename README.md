@@ -165,6 +165,11 @@ gs -sDEVICE=pdfwrite -dFirstPage=11 -dLastPage=20 -sOutputFile=part2.pdf input.p
 - **Nguyên nhân**: Không có quyền ghi vào thư mục Logs
 - **Giải pháp**: Chạy ứng dụng với quyền Administrator
 
+#### 5. "Lỗi Ghostscript API: Mã lỗi không xác định: -100"
+- **Nguyên nhân**: Ghostscript API yêu cầu poll callback nhưng không được thiết lập
+- **Giải pháp**: Đã được khắc phục trong phiên bản mới (v1.0.1+) bằng cách thêm poll callback vào GhostscriptAPI.cs
+- **Fallback**: Tự động chuyển sang sử dụng process-based Ghostscript nếu API thất bại
+
 ### Debug với logs
 
 Kiểm tra file log để troubleshooting:
@@ -209,10 +214,18 @@ PdfCompressor/
 ### Dependencies
 
 - **.NET 9.0 Windows Forms**: UI framework
-- **Ghostscript 9.x**: PDF processing engine
+- **Ghostscript 10.06.0**: PDF processing engine with DLL API integration
 - **System.IO**: File operations
 - **System.Diagnostics**: Process management
 - **System.Threading.Tasks**: Async operations
+
+### Ghostscript API Integration
+
+- **DLL Wrapper**: `GhostscriptAPI.cs` provides direct API calls with poll callback to prevent -100 errors
+- **Fallback System**: Automatic switch to process-based execution if API fails
+- **Error Handling**: Comprehensive error codes and Vietnamese error messages
+- **Performance**: Direct API calls provide better performance than process spawning
+- **Stability**: Poll callback implementation prevents interruption errors (v1.0.1+)
 
 ### Code Organization
 
@@ -232,7 +245,43 @@ PdfCompressor/
 
 ## 📜 License
 
-This project is proprietary software developed for BIDV internal use.
+This project is licensed under the MIT License - see the details below:
+
+```
+MIT License
+
+Copyright (c) 2025 Nguyễn Ngọc Tú
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### Third-party Dependencies
+
+This project includes the following third-party components:
+
+- **Ghostscript**: Licensed under the AGPL (Affero General Public License) v3+
+  - Copyright © 2025 Artifex Software, Inc. All rights reserved.
+  - More information: https://www.ghostscript.com/licensing/index.html
+
+By using this software, you agree to comply with both the MIT License for this project and the AGPL v3+ license for Ghostscript.
+
+ 
 
 ## 🔒 Security Note
 
@@ -240,6 +289,19 @@ This project is proprietary software developed for BIDV internal use.
 
 ---
 
-**Phiên bản**: 1.0.0
+**Phiên bản**: 1.0.1
 **Cập nhật lần cuối**: 4/11/2025
 **Framework**: .NET 9.0 Windows Forms
+
+### Version History
+
+- **v1.0.1** (4/11/2025):
+  - Fixed Ghostscript API -100 error by implementing poll callback
+  - Enhanced stability of Ghostscript DLL integration
+  - Updated error handling and logging
+
+- **v1.0.0** (4/11/2025):
+  - Initial release with intelligent PDF compression
+  - Document analysis and automatic optimization
+  - File splitting for large documents
+  - Vietnamese language interface
