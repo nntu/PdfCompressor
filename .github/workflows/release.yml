@@ -1,0 +1,133 @@
+name: Build, bump tag and Create Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Optional explicit release version (without leading v). If omitted, CI will auto-bump the latest v* tag by incrementing the last numeric segment.'
+        required: false
+        default: ''
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository (fetch tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 9 SDK
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Bump/create tag (auto or explicit)
+        id: bump
+        run: |
+          set -euo pipefail
+
+          REPO="${{ github.repository }}"
+          GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+
+          # Determine candidate version:
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            # Explicit version provided (use as-is, no increment)
+            VERSION="${{ github.event.inputs.version }}"
+            echo "Using explicit version input: $VERSION"
+          else
+            # Find latest tag matching v* (sorted by version)
+            git fetch --tags
+            LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -n1 || true)
+            if [ -n "$LATEST_TAG" ]; then
+              BASE_VERSION="${LATEST_TAG#v}"
+            else
+              # No existing tags found — use this base and increment it
+              BASE_VERSION="1.0.411.2025"
+            fi
+
+            # Split by '.' and increment last numeric segment
+            IFS='.' read -r -a parts <<< "$BASE_VERSION"
+            last_index=$((${#parts[@]} - 1))
+            # handle non-numeric safely by treating as 0
+            last_val="${parts[$last_index]}"
+            if ! printf '%s\n' "$last_val" | grep -Eq '^[0-9]+$'; then
+              last_val=0
+            fi
+            parts[$last_index]=$((10#$last_val + 1))
+            VERSION=$(IFS='.'; echo "${parts[*]}")
+            echo "Auto-bumped $BASE_VERSION -> $VERSION"
+          fi
+
+          TAG="v${VERSION}"
+
+          # Create annotated tag and push it
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # If tag already exists, skip creating it
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping tag creation."
+          else
+            git tag -a "$TAG" -m "CI: bump to $TAG"
+            # Push tag using token
+            git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" "$TAG"
+            echo "Pushed tag $TAG"
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "release_name=Release $VERSION" >> $GITHUB_OUTPUT
+
+      - name: Restore NuGet packages
+        run: dotnet restore
+
+      - name: Build (Release)
+        run: dotnet build --configuration Release
+
+      - name: Publish all projects to artifacts/publish
+        run: |
+          rm -rf ./artifacts/publish
+          mkdir -p ./artifacts/publish
+          find . -maxdepth 4 -name "*.csproj" -print0 | xargs -0 -n1 -I{} sh -c 'dotnet publish "{}" -c Release -o ./artifacts/publish || true'
+
+      - name: Create zip package
+        run: |
+          cd artifacts
+          ZIP_NAME="release-${{ steps.bump.outputs.version }}.zip"
+          if [ -d publish ]; then
+            zip -r "$ZIP_NAME" publish
+            echo "zip_path=$PWD/$ZIP_NAME" >> $GITHUB_OUTPUT
+          else
+            echo "No publish output found" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ steps.bump.outputs.tag }}
+          release_name: ${{ steps.bump.outputs.release_name }}
+          body: "Automated build release ${{ steps.bump.outputs.version }}"
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release asset (zip)
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./artifacts/release-${{ steps.bump.outputs.version }}.zip
+          asset_name: release-${{ steps.bump.outputs.version }}.zip
+          asset_content_type: application/zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
