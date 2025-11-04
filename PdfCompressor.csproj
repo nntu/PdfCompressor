@@ -1,0 +1,42 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+	  <VersionPrefix>1.0</VersionPrefix>
+
+	  <Version>$(VersionPrefix).$([System.DateTime]::UtcNow.ToString(ddMM)).$([System.DateTime]::UtcNow.ToString(yyyy))</Version>
+
+	  <InformationalVersion>$(VersionPrefix)-$([System.DateTime]::UtcNow.ToString(yyyy.MM.dd.HHmm))</InformationalVersion>
+
+	  <ApplicationIcon>pdfcompress.ico</ApplicationIcon>
+
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Remove="Ghostscript\gsdll64.dll" />
+    <None Remove="Ghostscript\gsdll64.lib" />
+    <None Remove="Ghostscript\gswin64.exe" />
+    <None Remove="Ghostscript\gswin64c.exe" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Ghostscript\gsdll64.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Ghostscript\gsdll64.lib">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Ghostscript\gswin64.exe">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Ghostscript\gswin64c.exe">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="pdfcompress.ico" />
+  </ItemGroup>
+
+</Project>
