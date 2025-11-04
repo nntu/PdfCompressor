@@ -1,133 +1,98 @@
-name: Build, bump tag and Create Release
+name: Windows x64 Auto-bump & Release (1.x.ddMM.yyyy)
 
 permissions:
   contents: write
 
 on:
   push:
-    branches:
-      - main
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Optional explicit release version (without leading v). If omitted, CI will auto-bump the latest v* tag by incrementing the last numeric segment.'
-        required: false
-        default: ''
+    branches: [ main ]
+  workflow_dispatch: {}
 
 jobs:
-  build-and-release:
-    runs-on: ubuntu-latest
+  release-windows:
+    runs-on: windows-latest
 
     steps:
-      - name: Checkout repository (fetch tags)
+      - name: Checkout (with tags)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup .NET 9 SDK
-        uses: actions/setup-dotnet@v3
+      # Nếu bạn KHÔNG dùng .NET, xóa 2 bước setup/build .NET bên dưới
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
 
-      - name: Bump/create tag (auto or explicit)
-        id: bump
+      - name: Compute next 1.x.ddMM.yyyy tag
+        id: version
+        shell: pwsh
         run: |
-          set -euo pipefail
+          $day   = (Get-Date -Format "dd")
+          $month = (Get-Date -Format "MM")
+          $year  = (Get-Date -Format "yyyy")
+          $dateToken = "$day$month"
+          $today     = "$dateToken.$year"
 
-          REPO="${{ github.repository }}"
-          GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          # Lấy tất cả tag trong format 1.*.ddMM.yyyy cho hôm nay
+          $pattern = "^1\.(\d+)\.$dateToken\.$year$"
+          $tags = (git tag --list "1.*.$dateToken.$year") | Sort-Object
 
-          # Determine candidate version:
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            # Explicit version provided (use as-is, no increment)
-            VERSION="${{ github.event.inputs.version }}"
-            echo "Using explicit version input: $VERSION"
-          else
-            # Find latest tag matching v* (sorted by version)
-            git fetch --tags
-            LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -n1 || true)
-            if [ -n "$LATEST_TAG" ]; then
-              BASE_VERSION="${LATEST_TAG#v}"
-            else
-              # No existing tags found � use this base and increment it
-              BASE_VERSION="1.0.411.2025"
-            fi
+          $nextX = 0
+          foreach ($t in $tags) {
+            $m = [regex]::Match($t, $pattern)
+            if ($m.Success) {
+              $val = [int]$m.Groups[1].Value
+              if ($val -ge $nextX) { $nextX = $val + 1 }
+            }
+          }
 
-            # Split by '.' and increment last numeric segment
-            IFS='.' read -r -a parts <<< "$BASE_VERSION"
-            last_index=$((${#parts[@]} - 1))
-            # handle non-numeric safely by treating as 0
-            last_val="${parts[$last_index]}"
-            if ! printf '%s\n' "$last_val" | grep -Eq '^[0-9]+$'; then
-              last_val=0
-            fi
-            parts[$last_index]=$((10#$last_val + 1))
-            VERSION=$(IFS='.'; echo "${parts[*]}")
-            echo "Auto-bumped $BASE_VERSION -> $VERSION"
-          fi
+          $version = "1.$nextX.$today"
+          "version=$version" >> $env:GITHUB_OUTPUT
 
-          TAG="v${VERSION}"
+      - name: Create and push tag
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if (git rev-parse -q --verify "refs/tags/$v") {
+            Write-Host "Tag $v already exists. Skipping create."
+          } else {
+            git tag "$v"
+            git push origin "$v"
+          }
 
-          # Create annotated tag and push it
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # If tag already exists, skip creating it
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping tag creation."
-          else
-            git tag -a "$TAG" -m "CI: bump to $TAG"
-            # Push tag using token
-            git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" "$TAG"
-            echo "Pushed tag $TAG"
-          fi
-
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "release_name=Release $VERSION" >> $GITHUB_OUTPUT
-
-      - name: Restore NuGet packages
+      # ====== BUILD WINDOWS X64 (ví dụ .NET) ======
+      - name: Restore
         run: dotnet restore
 
       - name: Build (Release)
-        run: dotnet build --configuration Release
+        run: dotnet build -c Release
 
-      - name: Publish all projects to artifacts/publish
-        run: |
-          rm -rf ./artifacts/publish
-          mkdir -p ./artifacts/publish
-          find . -maxdepth 4 -name "*.csproj" -print0 | xargs -0 -n1 -I{} sh -c 'dotnet publish "{}" -c Release -o ./artifacts/publish || true'
+      - name: Publish win-x64
+        run: dotnet publish -c Release -r win-x64 --self-contained false -o out\win-x64
 
-      - name: Create zip package
+      # Nếu bạn dùng ngôn ngữ khác:
+      # - Go:   setx GOOS windows; setx GOARCH amd64; go build -o out\win-x64\app.exe .
+      # - Rust: cargo build --release --target x86_64-pc-windows-msvc (copy target\...\release\*.exe -> out\win-x64)
+      # - C/C++: msbuild /p:Configuration=Release /p:Platform=x64
+
+      - name: Package zip (Windows x64)
+        shell: pwsh
         run: |
-          cd artifacts
-          ZIP_NAME="release-${{ steps.bump.outputs.version }}.zip"
-          if [ -d publish ]; then
-            zip -r "$ZIP_NAME" publish
-            echo "zip_path=$PWD/$ZIP_NAME" >> $GITHUB_OUTPUT
-          else
-            echo "No publish output found" >&2
-            exit 1
-          fi
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          $zip = "artifacts\release-${{ steps.version.outputs.version }}-win-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "out\win-x64\*" -DestinationPath $zip
 
       - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.bump.outputs.tag }}
-          release_name: ${{ steps.bump.outputs.release_name }}
-          body: "Automated build release ${{ steps.bump.outputs.version }}"
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          files: artifacts/release-${{ steps.version.outputs.version }}-win-x64.zip
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload release asset (zip)
-        uses: actions/upload-release-asset@v1
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./artifacts/release-${{ steps.bump.outputs.version }}.zip
-          asset_name: release-${{ steps.bump.outputs.version }}.zip
-          asset_content_type: application/zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
