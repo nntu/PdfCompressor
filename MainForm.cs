@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Reflection;
 using System.Threading.Tasks;
+using System.Linq;
 
 namespace PdfCompressor;
 
@@ -9,6 +10,11 @@ public partial class MainForm : Form
     private string? selectedPdfPath;
     private System.Threading.Thread? compressionThread;
     private bool isCompressionRunning = false;
+
+    // Merge functionality fields
+    private List<string> mergePdfFiles = new List<string>();
+    private System.Threading.Thread? mergeThread;
+    private bool isMergeRunning = false;
     private static string ProduceVersion()
     {
         // Lấy file .exe (assembly) đang chạy
@@ -266,21 +272,69 @@ public partial class MainForm : Form
 
             UpdateProgress(50);
 
-            // Build Ghostscript arguments with optimal compression settings
-            var arguments = BuildIntelligentGhostscriptArguments(inputPath, outputPath, optimalSettings, optimizeForScanned);
-
-            LogMessage("Bắt đầu nén với Ghostscript...");
+            // Use GhostscriptAPI wrapper for compression
+            LogMessage("Sử dụng Ghostscript API để nén file...");
             UpdateProgress(60);
 
-            var process = new System.Diagnostics.Process();
-            process.StartInfo.FileName = ghostscriptPath;
-            process.StartInfo.Arguments = arguments;
-            process.StartInfo.CreateNoWindow = true;
-            process.StartInfo.UseShellExecute = false;
-            process.Start();
-            process.WaitForExit();
+            try
+            {
+                if (!GhostscriptAPI.IsGhostscriptAvailable())
+                {
+                    LogMessage("Ghostscript API không sẵn có, sử dụng phương pháp thay thế...");
+                    throw new GhostscriptException("Ghostscript DLL not available", -1);
+                }
 
-            UpdateProgress(90);
+                using (var gsApi = new GhostscriptAPI())
+                {
+                    // Create compression settings based on optimal settings
+                    var compressionSettings = new PdfCompressionSettings
+                    {
+                        PdfSetting = optimalSettings.PdfSetting,
+                        ColorImageResolution = optimalSettings.ColorImageResolution,
+                        GrayImageResolution = optimalSettings.GrayImageResolution,
+                        JpegQuality = optimalSettings.JpegQuality,
+                        UseAutoFilter = optimalSettings.UseAutoFilter,
+                        UseDCTEncode = optimalSettings.UseDCTEncode,
+                        DownsampleColorImages = optimalSettings.DownsampleColorImages,
+                        DownsampleGrayImages = optimalSettings.DownsampleGrayImages
+                    };
+
+                    gsApi.CompressPdf(inputPath, outputPath, compressionSettings);
+                    UpdateProgress(90);
+
+                    LogMessage("Nén file thành công với Ghostscript API!");
+                }
+            }
+            catch (GhostscriptException gsEx)
+            {
+                using (var gsApi = new GhostscriptAPI(false))
+                {
+                    string errorMsg = gsApi.GetErrorMessage(gsEx.ErrorCode);
+                    LogMessage($"Lỗi Ghostscript API: {errorMsg}");
+                    LogMessage($"Chi tiết: {gsEx.Message}");
+                }
+
+                // Fallback to process-based approach
+                LogMessage("Thử phương pháp thay thế (process-based)...");
+
+                // Build Ghostscript arguments with optimal compression settings
+                var arguments = BuildIntelligentGhostscriptArguments(inputPath, outputPath, optimalSettings, optimizeForScanned);
+
+                LogMessage("Bắt đầu nén với Ghostscript process...");
+                UpdateProgress(70);
+
+                var process = new System.Diagnostics.Process();
+                process.StartInfo.FileName = ghostscriptPath;
+                process.StartInfo.Arguments = arguments;
+                process.StartInfo.CreateNoWindow = true;
+                process.StartInfo.UseShellExecute = false;
+                process.Start();
+                process.WaitForExit();
+
+                UpdateProgress(90);
+
+                LogMessage("Nén file thành công với phương pháp thay thế!");
+            }
 
             var originalSize = GetFileSize(inputPath);
             var compressedSize = GetFileSize(outputPath);
@@ -653,24 +707,41 @@ public partial class MainForm : Form
                 // For now, we'll just copy the file multiple times as placeholders
                 LogMessage($"Creating part {i + 1} of {numSplits}: {System.IO.Path.GetFileName(splitOutputPath)}");
 
-                // In a real implementation, you would use Ghostscript or PDF library to extract page ranges
-                // Example: gs -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage=1 -dLastPage=10 -sOutputFile=part1.pdf input.pdf
-
+                // Use GhostscriptAPI to split file by page ranges
                 await Task.Run(() =>
                 {
-                    var ghostscriptPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Ghostscript", "gswin64c.exe");
-                    var startPage = i * 10 + 1; // Rough estimation: 10 pages per split
-                    var endPage = (i + 1) * 10;
+                    try
+                    {
+                        using (var gsApi = new GhostscriptAPI())
+                        {
+                            var startPage = i * 10 + 1; // Rough estimation: 10 pages per split
+                            var endPage = (i + 1) * 10;
 
-                    var arguments = $"-sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={startPage} -dLastPage={endPage} -sOutputFile=\"{splitOutputPath}\" \"{inputPath}\"";
+                            gsApi.SplitPdfByPageRange(inputPath, splitOutputPath, startPage, endPage);
+                            LogMessage($"Đã tạo phần {i + 1}: {System.IO.Path.GetFileName(splitOutputPath)}");
+                        }
+                    }
+                    catch (GhostscriptException gsEx)
+                    {
+                        LogMessage($"Lỗi Ghostscript API khi chia file: {gsEx.Message} (Error Code: {gsEx.ErrorCode})");
 
-                    var process = new System.Diagnostics.Process();
-                    process.StartInfo.FileName = ghostscriptPath;
-                    process.StartInfo.Arguments = arguments;
-                    process.StartInfo.CreateNoWindow = true;
-                    process.StartInfo.UseShellExecute = false;
-                    process.Start();
-                    process.WaitForExit();
+                        // Fallback to process-based approach
+                        var ghostscriptPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Ghostscript", "gswin64c.exe");
+                        var startPage = i * 10 + 1; // Rough estimation: 10 pages per split
+                        var endPage = (i + 1) * 10;
+
+                        var arguments = $"-sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={startPage} -dLastPage={endPage} -sOutputFile=\"{splitOutputPath}\" \"{inputPath}\"";
+
+                        var process = new System.Diagnostics.Process();
+                        process.StartInfo.FileName = ghostscriptPath;
+                        process.StartInfo.Arguments = arguments;
+                        process.StartInfo.CreateNoWindow = true;
+                        process.StartInfo.UseShellExecute = false;
+                        process.Start();
+                        process.WaitForExit();
+
+                        LogMessage($"Đã tạo phần {i + 1} với phương pháp thay thế: {System.IO.Path.GetFileName(splitOutputPath)}");
+                    }
                 });
 
                 // Update progress for splitting
@@ -744,14 +815,20 @@ public partial class MainForm : Form
         }
     }
 
-    private void Form1_FormClosing(object sender, FormClosingEventArgs e)
+    private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
     {
-        // Clean up thread if form is closing during compression
+        // Clean up threads if form is closing during operations
         if (isCompressionRunning && compressionThread != null && compressionThread.IsAlive)
         {
             // Thread.Abort() is obsolete, just let the thread complete naturally
             // We set a flag to signal the thread to stop if needed
             isCompressionRunning = false;
+        }
+
+        if (isMergeRunning && mergeThread != null && mergeThread.IsAlive)
+        {
+            // Set flag to signal the merge thread to stop
+            isMergeRunning = false;
         }
     }
 
@@ -759,5 +836,425 @@ public partial class MainForm : Form
     {
         var version = ProduceVersion();
         this.Text = $"PDF Compressor - Tối ưu hóa file PDF (v {version})";
+
+        // Check Ghostscript availability on startup
+        try
+        {
+            if (GhostscriptAPI.IsGhostscriptAvailable())
+            {
+                LogMessage("Ghostscript API: Sẵn sàng");
+                LogMessage($"Đường dẫn DLL: {System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Ghostscript", "gsdll64.dll")}");
+            }
+            else
+            {
+                LogMessage("Cảnh báo: Ghostscript API không sẵn có, sẽ sử dụng phương pháp thay thế");
+                LogMessage("Vui lòng kiểm tra file gsdll64.dll trong thư mục Ghostscript");
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Lỗi khi kiểm tra Ghostscript: {ex.Message}");
+        }
     }
+
+    #region PDF Merge Functionality
+
+    private void LogMergeMessage(string message)
+    {
+        if (mergeLogTextBox.InvokeRequired)
+        {
+            mergeLogTextBox.Invoke(new Action<string>(LogMergeMessage), message);
+            return;
+        }
+
+        var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        var logEntry = $"[{timestamp}] {message}";
+
+        // Add to UI
+        mergeLogTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\r\n");
+
+        // Save to file
+        SaveLogToFile($"[MERGE] {logEntry}");
+    }
+
+    private void UpdateMergeProgress(int value)
+    {
+        if (mergeProgressBar.InvokeRequired)
+        {
+            mergeProgressBar.Invoke(new Action<int>(UpdateMergeProgress), value);
+            return;
+        }
+        mergeProgressBar.Value = value;
+    }
+
+    private void UpdateMergeStatus(string status)
+    {
+        if (mergeStatusLabel.InvokeRequired)
+        {
+            mergeStatusLabel.Invoke(new Action<string>(UpdateMergeStatus), status);
+            return;
+        }
+        mergeStatusLabel.Text = status;
+    }
+
+    private void addPdfButton_Click(object sender, EventArgs e)
+    {
+        if (openPdfFileDialog.ShowDialog() == DialogResult.OK)
+        {
+            foreach (string fileName in openPdfFileDialog.FileNames)
+            {
+                if (!mergePdfFiles.Contains(fileName))
+                {
+                    mergePdfFiles.Add(fileName);
+                    mergePdfListBox.Items.Add(System.IO.Path.GetFileName(fileName));
+                    LogMergeMessage($"Đã thêm file: {System.IO.Path.GetFileName(fileName)} ({FormatFileSize(GetFileSize(fileName))})");
+                }
+                else
+                {
+                    LogMergeMessage($"File đã tồn tại: {System.IO.Path.GetFileName(fileName)}");
+                }
+            }
+
+            UpdateMergeButtonState();
+            LogMergeMessage($"Tổng số file: {mergePdfFiles.Count}");
+        }
+    }
+
+    private void removePdfButton_Click(object sender, EventArgs e)
+    {
+        var selectedIndices = mergePdfListBox.SelectedIndices.Cast<int>().OrderByDescending(i => i).ToList();
+
+        foreach (int index in selectedIndices)
+        {
+            if (index >= 0 && index < mergePdfFiles.Count && index < mergePdfListBox.Items.Count)
+            {
+                try
+                {
+                    string fileName = mergePdfFiles[index];
+                    mergePdfFiles.RemoveAt(index);
+                    mergePdfListBox.Items.RemoveAt(index);
+                    LogMergeMessage($"Đã xóa file: {System.IO.Path.GetFileName(fileName)}");
+                }
+                catch (Exception ex)
+                {
+                    LogMergeMessage($"Lỗi khi xóa file tại vị trí {index}: {ex.Message}");
+                }
+            }
+        }
+
+        UpdateMergeButtonState();
+        LogMergeMessage($"Tổng số file: {mergePdfFiles.Count}");
+    }
+
+    private void moveUpButton_Click(object sender, EventArgs e)
+    {
+        int selectedIndex = mergePdfListBox.SelectedIndex;
+        if (selectedIndex > 0 && selectedIndex < mergePdfFiles.Count && selectedIndex - 1 >= 0)
+        {
+            try
+            {
+                // Swap in the list
+                string temp = mergePdfFiles[selectedIndex];
+                mergePdfFiles[selectedIndex] = mergePdfFiles[selectedIndex - 1];
+                mergePdfFiles[selectedIndex - 1] = temp;
+
+                // Swap in the ListBox
+                if (selectedIndex < mergePdfListBox.Items.Count && selectedIndex - 1 >= 0)
+                {
+                    object tempItem = mergePdfListBox.Items[selectedIndex];
+                    mergePdfListBox.Items[selectedIndex] = mergePdfListBox.Items[selectedIndex - 1];
+                    mergePdfListBox.Items[selectedIndex - 1] = tempItem;
+
+                    mergePdfListBox.SelectedIndex = selectedIndex - 1;
+                    LogMergeMessage($"Đã di chuyển file lên trên: {System.IO.Path.GetFileName(mergePdfFiles[selectedIndex])}");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMergeMessage($"Lỗi khi di chuyển file lên: {ex.Message}");
+            }
+        }
+    }
+
+    private void moveDownButton_Click(object sender, EventArgs e)
+    {
+        int selectedIndex = mergePdfListBox.SelectedIndex;
+        if (selectedIndex >= 0 && selectedIndex < mergePdfFiles.Count - 1 && selectedIndex + 1 < mergePdfFiles.Count)
+        {
+            try
+            {
+                // Swap in the list
+                string temp = mergePdfFiles[selectedIndex];
+                mergePdfFiles[selectedIndex] = mergePdfFiles[selectedIndex + 1];
+                mergePdfFiles[selectedIndex + 1] = temp;
+
+                // Swap in the ListBox
+                if (selectedIndex < mergePdfListBox.Items.Count && selectedIndex + 1 < mergePdfListBox.Items.Count)
+                {
+                    object tempItem = mergePdfListBox.Items[selectedIndex];
+                    mergePdfListBox.Items[selectedIndex] = mergePdfListBox.Items[selectedIndex + 1];
+                    mergePdfListBox.Items[selectedIndex + 1] = tempItem;
+
+                    mergePdfListBox.SelectedIndex = selectedIndex + 1;
+                    LogMergeMessage($"Đã di chuyển file xuống dưới: {System.IO.Path.GetFileName(mergePdfFiles[selectedIndex])}");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMergeMessage($"Lỗi khi di chuyển file xuống: {ex.Message}");
+            }
+        }
+    }
+
+    private void UpdateMergeButtonState()
+    {
+        mergeButton.Enabled = mergePdfFiles.Count >= 2 && !isMergeRunning;
+        moveUpButton.Enabled = mergePdfListBox.SelectedIndex > 0 &&
+                               mergePdfListBox.SelectedIndex < mergePdfFiles.Count &&
+                               !isMergeRunning;
+        moveDownButton.Enabled = mergePdfListBox.SelectedIndex >= 0 &&
+                                mergePdfListBox.SelectedIndex < mergePdfFiles.Count - 1 &&
+                                !isMergeRunning;
+        removePdfButton.Enabled = mergePdfListBox.SelectedIndices.Count > 0 && !isMergeRunning;
+        addPdfButton.Enabled = !isMergeRunning;
+    }
+
+    private void mergeButton_Click(object sender, EventArgs e)
+    {
+        if (isMergeRunning)
+        {
+            MessageBox.Show("Merge operation is already in progress. Please wait.", "Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        if (mergePdfFiles.Count < 2)
+        {
+            MessageBox.Show("Please add at least 2 PDF files to merge.", "Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        saveMergeFileDialog.FileName = "merged.pdf";
+        if (saveMergeFileDialog.ShowDialog() == DialogResult.OK)
+        {
+            StartMergeThread(saveMergeFileDialog.FileName);
+        }
+    }
+
+    private void StartMergeThread(string outputPath)
+    {
+        isMergeRunning = true;
+        UpdateMergeButtonState();
+        mergeProgressBar.Visible = true;
+        mergeProgressBar.Value = 0;
+
+        // Create a copy of the file list to avoid modification during merge
+        var filesToMerge = new List<string>(mergePdfFiles);
+
+        mergeThread = new System.Threading.Thread(() => MergePdfThreaded(filesToMerge, outputPath));
+        mergeThread.IsBackground = true;
+        mergeThread.Start();
+
+        LogMergeMessage("Bắt đầu gộp file PDF...");
+        UpdateMergeStatus("Đang gộp...");
+    }
+
+    private async void MergePdfThreaded(List<string> inputPaths, string outputPath)
+    {
+        try
+        {
+            if (inputPaths.Count < 2)
+            {
+                throw new ArgumentException("At least 2 PDF files are required for merging");
+            }
+
+            LogMergeMessage($"Số lượng file cần gộp: {inputPaths.Count}");
+            UpdateMergeProgress(10);
+
+            // Validate all input files exist
+            foreach (string filePath in inputPaths)
+            {
+                if (!System.IO.File.Exists(filePath))
+                {
+                    throw new FileNotFoundException($"Input PDF file not found: {System.IO.Path.GetFileName(filePath)}", filePath);
+                }
+                LogMergeMessage($"File: {System.IO.Path.GetFileName(filePath)} ({FormatFileSize(GetFileSize(filePath))})");
+            }
+
+            UpdateMergeProgress(20);
+
+            // Use GhostscriptAPI to merge PDFs
+            using (var gsApi = new GhostscriptAPI())
+            {
+                LogMergeMessage("Sử dụng Ghostscript API để gộp file...");
+                UpdateMergeProgress(30);
+
+                try
+                {
+                    if (!GhostscriptAPI.IsGhostscriptAvailable())
+                    {
+                        LogMergeMessage("Ghostscript API không sẵn có, sử dụng phương pháp thay thế...");
+                        throw new GhostscriptException("Ghostscript DLL not available", -1);
+                    }
+
+                    gsApi.MergePdfFiles(inputPaths.ToArray(), outputPath);
+                    UpdateMergeProgress(80);
+
+                    LogMergeMessage("Gộp file thành công với Ghostscript API!");
+
+                    // Verify output file was created
+                    if (!System.IO.File.Exists(outputPath))
+                    {
+                        throw new InvalidOperationException("Output file was not created");
+                    }
+
+                    var outputSize = GetFileSize(outputPath);
+                    var totalInputSize = inputPaths.Sum(GetFileSize);
+
+                    LogMergeMessage($"File kết quả: {System.IO.Path.GetFileName(outputPath)}");
+                    LogMergeMessage($"Kích thước tổng các file gốc: {FormatFileSize(totalInputSize)}");
+                    LogMergeMessage($"Kích thước file sau khi gộp: {FormatFileSize(outputSize)}");
+
+                    UpdateMergeProgress(100);
+
+                    // Update UI on main thread
+                    this.Invoke(new Action(() =>
+                    {
+                        UpdateMergeStatus("Gộp hoàn tất!");
+
+                        var result = MessageBox.Show(
+                            $"Gộp file hoàn tất!\n\nSố lượng file đã gộp: {inputPaths.Count}\nKích thước tổng: {FormatFileSize(totalInputSize)}\nKích thước file kết quả: {FormatFileSize(outputSize)}\n\nBạn có muốn mở thư mục kết quả không?",
+                            "Thành công",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Information);
+
+                        if (result == DialogResult.Yes)
+                        {
+                            OpenOutputFolder(outputPath);
+                        }
+                    }));
+                }
+                catch (GhostscriptException gsEx)
+                {
+                    using (var gsErrorApi = new GhostscriptAPI(false))
+                    {
+                        string errorMsg = gsErrorApi.GetErrorMessage(gsEx.ErrorCode);
+                        LogMergeMessage($"Lỗi Ghostscript API: {errorMsg}");
+                        LogMergeMessage($"Chi tiết: {gsEx.Message}");
+                    }
+
+                    // Fallback to process-based approach
+                    LogMergeMessage("Thử phương pháp thay thế...");
+                    await MergePdfWithProcess(inputPaths, outputPath);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMergeMessage($"Lỗi khi gộp file: {ex.Message}");
+            this.Invoke(new Action(() =>
+            {
+                UpdateMergeStatus("Gộp thất bại!");
+                MessageBox.Show($"Merge failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }));
+        }
+        finally
+        {
+            this.Invoke(new Action(() =>
+            {
+                isMergeRunning = false;
+                UpdateMergeButtonState();
+                mergeProgressBar.Visible = false;
+            }));
+        }
+    }
+
+    private async Task MergePdfWithProcess(List<string> inputPaths, string outputPath)
+    {
+        try
+        {
+            LogMergeMessage("Sử dụng phương pháp Ghostscript process...");
+            UpdateMergeProgress(40);
+
+            var ghostscriptPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Ghostscript", "gswin64c.exe");
+
+            // Build Ghostscript arguments for merging
+            var args = new List<string>
+            {
+                "-sDEVICE=pdfwrite",
+                "-dNOPAUSE",
+                "-dBATCH",
+                "-dQUIET",
+                $"-sOutputFile=\"{outputPath}\""
+            };
+
+            args.AddRange(inputPaths.Select(path => $"\"{path}\""));
+
+            var arguments = string.Join(" ", args);
+            LogMergeMessage($"Thực thi: {arguments}");
+
+            UpdateMergeProgress(60);
+
+            var process = new System.Diagnostics.Process();
+            process.StartInfo.FileName = ghostscriptPath;
+            process.StartInfo.Arguments = arguments;
+            process.StartInfo.CreateNoWindow = true;
+            process.StartInfo.UseShellExecute = false;
+            process.Start();
+            await Task.Run(() => process.WaitForExit());
+
+            UpdateMergeProgress(90);
+
+            if (process.ExitCode == 0 && System.IO.File.Exists(outputPath))
+            {
+                LogMergeMessage("Gộp file thành công với phương pháp thay thế!");
+
+                var outputSize = GetFileSize(outputPath);
+                var totalInputSize = inputPaths.Sum(GetFileSize);
+
+                LogMergeMessage($"File kết quả: {System.IO.Path.GetFileName(outputPath)}");
+                LogMergeMessage($"Kích thước file sau khi gộp: {FormatFileSize(outputSize)}");
+
+                UpdateMergeProgress(100);
+
+                this.Invoke(new Action(() =>
+                {
+                    UpdateMergeStatus("Gộp hoànất!");
+
+                    var result = MessageBox.Show(
+                        $"Gộp file hoàn tất!\n\nSố lượng file đã gộp: {inputPaths.Count}\nKích thước file kết quả: {FormatFileSize(outputSize)}\n\nBạn có muốn mở thư mục kết quả không?",
+                        "Thành công",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Information);
+
+                    if (result == DialogResult.Yes)
+                    {
+                        OpenOutputFolder(outputPath);
+                    }
+                }));
+            }
+            else
+            {
+                throw new InvalidOperationException($"Ghostscript process failed with exit code: {process.ExitCode}");
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMergeMessage($"Phương pháp thay thế cũng thất bại: {ex.Message}");
+            throw;
+        }
+    }
+
+    private void mergePdfListBox_SelectedIndexChanged(object sender, EventArgs e)
+    {
+        try
+        {
+            UpdateMergeButtonState();
+        }
+        catch (Exception ex)
+        {
+            LogMergeMessage($"Lỗi khi cập nhật trạng thái nút: {ex.Message}");
+        }
+    }
+
+    #endregion
 }

@@ -190,8 +190,9 @@ findstr /i "error" ./Logs/PDFCompressor_*.log
 
 ```
 PdfCompressor/
-├── Form1.cs                 # Main form logic and compression
-├── Form1.Designer.cs        # UI layout (Vietnamese)
+├── MainForm.cs              # Main form logic and compression
+├── MainForm.Designer.cs     # UI layout (Vietnamese)
+├── GhostscriptAPI.cs        # Ghostscript DLL wrapper
 ├── Program.cs              # Application entry point
 ├── PdfCompressor.csproj    # Project configuration
 ├── Ghostscript/            # Ghostscript binaries

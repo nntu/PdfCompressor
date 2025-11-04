@@ -52,6 +52,21 @@ partial class MainForm
         labelSplitSize = new Label();
         checkBoxEnableSplitting = new CheckBox();
         progressBar = new ProgressBar();
+        tabMerge = new TabPage();
+        mergePdfListBox = new ListBox();
+        addPdfButton = new Button();
+        removePdfButton = new Button();
+        moveUpButton = new Button();
+        moveDownButton = new Button();
+        mergeButton = new Button();
+        mergeProgressBar = new ProgressBar();
+        mergeStatusLabel = new Label();
+        saveMergeFileDialog = new SaveFileDialog();
+        openPdfFileDialog = new OpenFileDialog();
+        groupBoxMergeFiles = new GroupBox();
+        groupBoxMergeControls = new GroupBox();
+        mergeLogTextBox = new TextBox();
+        groupBoxMergeLog = new GroupBox();
         tabAbout = new TabPage();
         labelAuthorInfo = new Label();
         labelVersion = new Label();
@@ -63,6 +78,10 @@ partial class MainForm
         groupBoxCompressionSettings.SuspendLayout();
         ((System.ComponentModel.ISupportInitialize)trackBarImageQuality).BeginInit();
         groupBoxSplitOptions.SuspendLayout();
+        tabMerge.SuspendLayout();
+        groupBoxMergeFiles.SuspendLayout();
+        groupBoxMergeControls.SuspendLayout();
+        groupBoxMergeLog.SuspendLayout();
         tabAbout.SuspendLayout();
         SuspendLayout();
         // 
@@ -102,13 +121,25 @@ partial class MainForm
         openFileDialog.Title = "Chọn file PDF";
         // 
         // saveFileDialog
-        // 
+        //
         saveFileDialog.Filter = "PDF Files|*.pdf";
         saveFileDialog.Title = "Lưu file PDF đã nén";
-        // 
+        //
+        // openPdfFileDialog
+        //
+        openPdfFileDialog.Filter = "PDF Files|*.pdf";
+        openPdfFileDialog.Title = "Chọn file PDF để gộp";
+        openPdfFileDialog.Multiselect = true;
+        //
+        // saveMergeFileDialog
+        //
+        saveMergeFileDialog.Filter = "PDF Files|*.pdf";
+        saveMergeFileDialog.Title = "Lưu file PDF đã gộp";
+        //
         // tabControl
-        // 
+        //
         tabControl.Controls.Add(tabProgram);
+        tabControl.Controls.Add(tabMerge);
         tabControl.Controls.Add(tabAbout);
         tabControl.Dock = DockStyle.Fill;
         tabControl.Location = new Point(0, 0);
@@ -133,6 +164,145 @@ partial class MainForm
         tabProgram.TabIndex = 0;
         tabProgram.Text = "Chương trình";
         tabProgram.UseVisualStyleBackColor = true;
+        //
+        // tabMerge
+        //
+        tabMerge.Controls.Add(groupBoxMergeFiles);
+        tabMerge.Controls.Add(groupBoxMergeControls);
+        tabMerge.Controls.Add(groupBoxMergeLog);
+        tabMerge.Location = new Point(4, 24);
+        tabMerge.Name = "tabMerge";
+        tabMerge.Padding = new Padding(3);
+        tabMerge.Size = new Size(776, 433);
+        tabMerge.TabIndex = 1;
+        tabMerge.Text = "Gộp PDF";
+        tabMerge.UseVisualStyleBackColor = true;
+        //
+        // groupBoxMergeFiles
+        //
+        groupBoxMergeFiles.Controls.Add(mergePdfListBox);
+        groupBoxMergeFiles.Location = new Point(12, 12);
+        groupBoxMergeFiles.Name = "groupBoxMergeFiles";
+        groupBoxMergeFiles.Size = new Size(400, 300);
+        groupBoxMergeFiles.TabIndex = 0;
+        groupBoxMergeFiles.TabStop = false;
+        groupBoxMergeFiles.Text = "Danh sách file PDF";
+        //
+        // mergePdfListBox
+        //
+        mergePdfListBox.FormattingEnabled = true;
+        mergePdfListBox.ItemHeight = 15;
+        mergePdfListBox.Location = new Point(15, 25);
+        mergePdfListBox.Name = "mergePdfListBox";
+        mergePdfListBox.SelectionMode = SelectionMode.MultiExtended;
+        mergePdfListBox.Size = new Size(370, 259);
+        mergePdfListBox.TabIndex = 0;
+        mergePdfListBox.SelectedIndexChanged += mergePdfListBox_SelectedIndexChanged;
+        //
+        // groupBoxMergeControls
+        //
+        groupBoxMergeControls.Controls.Add(addPdfButton);
+        groupBoxMergeControls.Controls.Add(removePdfButton);
+        groupBoxMergeControls.Controls.Add(moveUpButton);
+        groupBoxMergeControls.Controls.Add(moveDownButton);
+        groupBoxMergeControls.Controls.Add(mergeButton);
+        groupBoxMergeControls.Controls.Add(mergeProgressBar);
+        groupBoxMergeControls.Controls.Add(mergeStatusLabel);
+        groupBoxMergeControls.Location = new Point(420, 12);
+        groupBoxMergeControls.Name = "groupBoxMergeControls";
+        groupBoxMergeControls.Size = new Size(340, 300);
+        groupBoxMergeControls.TabIndex = 1;
+        groupBoxMergeControls.TabStop = false;
+        groupBoxMergeControls.Text = "Điều khiển";
+        //
+        // addPdfButton
+        //
+        addPdfButton.Location = new Point(15, 25);
+        addPdfButton.Name = "addPdfButton";
+        addPdfButton.Size = new Size(100, 30);
+        addPdfButton.TabIndex = 0;
+        addPdfButton.Text = "Thêm file";
+        addPdfButton.UseVisualStyleBackColor = true;
+        addPdfButton.Click += addPdfButton_Click;
+        //
+        // removePdfButton
+        //
+        removePdfButton.Location = new Point(125, 25);
+        removePdfButton.Name = "removePdfButton";
+        removePdfButton.Size = new Size(100, 30);
+        removePdfButton.TabIndex = 1;
+        removePdfButton.Text = "Xóa file";
+        removePdfButton.UseVisualStyleBackColor = true;
+        removePdfButton.Click += removePdfButton_Click;
+        //
+        // moveUpButton
+        //
+        moveUpButton.Location = new Point(235, 25);
+        moveUpButton.Name = "moveUpButton";
+        moveUpButton.Size = new Size(90, 30);
+        moveUpButton.TabIndex = 2;
+        moveUpButton.Text = "Lên trên";
+        moveUpButton.UseVisualStyleBackColor = true;
+        moveUpButton.Click += moveUpButton_Click;
+        //
+        // moveDownButton
+        //
+        moveDownButton.Location = new Point(15, 65);
+        moveDownButton.Name = "moveDownButton";
+        moveDownButton.Size = new Size(90, 30);
+        moveDownButton.TabIndex = 3;
+        moveDownButton.Text = "Xuống dưới";
+        moveDownButton.UseVisualStyleBackColor = true;
+        moveDownButton.Click += moveDownButton_Click;
+        //
+        // mergeButton
+        //
+        mergeButton.Enabled = false;
+        mergeButton.Location = new Point(125, 65);
+        mergeButton.Name = "mergeButton";
+        mergeButton.Size = new Size(100, 30);
+        mergeButton.TabIndex = 4;
+        mergeButton.Text = "Gộp PDF";
+        mergeButton.UseVisualStyleBackColor = true;
+        mergeButton.Click += mergeButton_Click;
+        //
+        // mergeProgressBar
+        //
+        mergeProgressBar.Location = new Point(15, 105);
+        mergeProgressBar.Name = "mergeProgressBar";
+        mergeProgressBar.Size = new Size(310, 23);
+        mergeProgressBar.TabIndex = 5;
+        mergeProgressBar.Visible = false;
+        //
+        // mergeStatusLabel
+        //
+        mergeStatusLabel.AutoSize = true;
+        mergeStatusLabel.Location = new Point(15, 140);
+        mergeStatusLabel.Name = "mergeStatusLabel";
+        mergeStatusLabel.Size = new Size(113, 15);
+        mergeStatusLabel.TabIndex = 6;
+        mergeStatusLabel.Text = "Trạng thái: Sẵn sàng";
+        //
+        // groupBoxMergeLog
+        //
+        groupBoxMergeLog.Controls.Add(mergeLogTextBox);
+        groupBoxMergeLog.Location = new Point(12, 325);
+        groupBoxMergeLog.Name = "groupBoxMergeLog";
+        groupBoxMergeLog.Size = new Size(748, 95);
+        groupBoxMergeLog.TabIndex = 2;
+        groupBoxMergeLog.TabStop = false;
+        groupBoxMergeLog.Text = "Nhật ký gộp file";
+        //
+        // mergeLogTextBox
+        //
+        mergeLogTextBox.Location = new Point(10, 20);
+        mergeLogTextBox.Multiline = true;
+        mergeLogTextBox.Name = "mergeLogTextBox";
+        mergeLogTextBox.ReadOnly = true;
+        mergeLogTextBox.ScrollBars = ScrollBars.Vertical;
+        mergeLogTextBox.Size = new Size(728, 65);
+        mergeLogTextBox.TabIndex = 0;
+        mergeLogTextBox.Text = "Nhật ký gộp file:\r\n";
         // 
         // logTextBox
         // 
@@ -312,7 +482,7 @@ partial class MainForm
         tabAbout.Name = "tabAbout";
         tabAbout.Padding = new Padding(3);
         tabAbout.Size = new Size(776, 433);
-        tabAbout.TabIndex = 1;
+        tabAbout.TabIndex = 2;
         tabAbout.Text = "Thông tin";
         tabAbout.UseVisualStyleBackColor = true;
         // 
@@ -372,7 +542,7 @@ partial class MainForm
         Icon = (Icon)resources.GetObject("$this.Icon");
         Name = "MainForm";
         Text = "PDF Compressor - Tối ưu hóa file PDF";
-        FormClosing += Form1_FormClosing;
+        FormClosing += MainForm_FormClosing;
         Load += MainForm_Load;
         tabControl.ResumeLayout(false);
         tabProgram.ResumeLayout(false);
@@ -382,6 +552,12 @@ partial class MainForm
         ((System.ComponentModel.ISupportInitialize)trackBarImageQuality).EndInit();
         groupBoxSplitOptions.ResumeLayout(false);
         groupBoxSplitOptions.PerformLayout();
+        tabMerge.ResumeLayout(false);
+        groupBoxMergeFiles.ResumeLayout(false);
+        groupBoxMergeControls.ResumeLayout(false);
+        groupBoxMergeControls.PerformLayout();
+        groupBoxMergeLog.ResumeLayout(false);
+        groupBoxMergeLog.PerformLayout();
         tabAbout.ResumeLayout(false);
         tabAbout.PerformLayout();
         ResumeLayout(false);
@@ -418,4 +594,19 @@ partial class MainForm
     private System.Windows.Forms.Label labelVersion;
     private System.Windows.Forms.Label labelEmail;
     private System.Windows.Forms.Label labelPhone;
+    private System.Windows.Forms.TabPage tabMerge;
+    private System.Windows.Forms.ListBox mergePdfListBox;
+    private System.Windows.Forms.Button addPdfButton;
+    private System.Windows.Forms.Button removePdfButton;
+    private System.Windows.Forms.Button moveUpButton;
+    private System.Windows.Forms.Button moveDownButton;
+    private System.Windows.Forms.Button mergeButton;
+    private System.Windows.Forms.ProgressBar mergeProgressBar;
+    private System.Windows.Forms.Label mergeStatusLabel;
+    private System.Windows.Forms.SaveFileDialog saveMergeFileDialog;
+    private System.Windows.Forms.OpenFileDialog openPdfFileDialog;
+    private System.Windows.Forms.GroupBox groupBoxMergeFiles;
+    private System.Windows.Forms.GroupBox groupBoxMergeControls;
+    private System.Windows.Forms.TextBox mergeLogTextBox;
+    private System.Windows.Forms.GroupBox groupBoxMergeLog;
 }

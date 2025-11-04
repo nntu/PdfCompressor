@@ -36,13 +36,13 @@ No test framework is currently configured in this project.
 ### Core Components
 
 - **Program.cs**: Entry point for the Windows Forms application
-- **Form1.cs**: Main application form containing:
+- **MainForm.cs**: Main application form containing:
   - File selection dialog integration with auto-naming (.compress.pdf suffix)
   - Multi-threaded PDF compression logic using Ghostscript
   - Real-time logging and progress tracking
   - Advanced compression settings for scanned documents
   - UI event handlers with thread-safe operations
-- **Form1.Designer.cs**: Auto-generated Windows Forms UI layout code
+- **MainForm.Designer.cs**: Auto-generated Windows Forms UI layout code
 
 ### Key Dependencies
 
@@ -88,8 +88,9 @@ The application implements an intelligent compression strategy with automatic do
 ```
 PdfCompressor/
 ├── Program.cs                    # Application entry point
-├── Form1.cs                     # Main form logic and compression
-├── Form1.Designer.cs            # Auto-generated UI code
+├── MainForm.cs                  # Main form logic and compression
+├── MainForm.Designer.cs         # Auto-generated UI code
+├── GhostscriptAPI.cs            # Ghostscript DLL wrapper
 ├── PdfCompressor.csproj         # Project configuration
 ├── Ghostscript/                 # Ghostscript binaries
 │   ├── gswin64c.exe            # Ghostscript CLI
