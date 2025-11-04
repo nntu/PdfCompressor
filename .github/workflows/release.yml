@@ -82,7 +82,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          $zip = "artifacts\release-${{ steps.version.outputs.version }}-win-x64.zip"
+          $zip = "artifacts\PdfCompressor_release-${{ steps.version.outputs.version }}-win-x64.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "out\win-x64\*" -DestinationPath $zip
 
@@ -91,7 +91,7 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.version }}
           name: ${{ steps.version.outputs.version }}
-          files: artifacts/release-${{ steps.version.outputs.version }}-win-x64.zip
+          files: artifacts/PdfCompressor_release-${{ steps.version.outputs.version }}-win-x64.zip
           draft: false
           prerelease: false
         env:
