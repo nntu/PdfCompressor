@@ -18,7 +18,9 @@
 - 🎯 **Tối ưu hóa thông minh**: Chọn tham số nén phù hợp nhất dựa trên loại tài liệu
 - 📁 **Chia nhỏ file lớn**: Tự động chia file >10MB thành các phần nhỏ hơn
 - 🌐 **Giao diện tiếng Việt**: Hoàn toàn bằng tiếng Việt, dễ sử dụng
-- 📊 **Logging chi tiết**: Ghi lại nhật ký hoạt động để debug
+- 📊 **Logging nâng cao với NLog**: Hệ thống logging chuyên nghiệp, hỗ trợ multi-user
+- 👥 **Multi-user Support**: Hoạt động tốt trên thư mục share cho nhiều người dùng
+- 🔄 **Async Logging**: Không bị lock file, performance cao
 - 📂 **Mở thư mục kết quả**: Hỏi người dùng có muốn mở thư mục chứa file kết quả
 - 🎛️ **Tab interface**: Giao diện chuyên nghiệp với 2 tabs
 
@@ -36,7 +38,9 @@
 
 1. Download file ZIP từ releases
 2. Giải nén vào thư mục mong muốn
-3. Chạy `PDFCompressor.exe`
+3. **Quan trọng**: Đảm bảo quyền ghi vào thư mục để tạo log files
+4. Chạy `PDFCompressor.exe`
+5. **Lần đầu chạy**: Tự động tạo thư mục `Logs/` và file `NLog.config`
 
 ### Cách 2: Build từ source code
 
@@ -51,6 +55,16 @@ dotnet build --configuration Release
 # Chạy ứng dụng
 dotnet run --configuration Release
 ```
+
+### Cách 3: Deploy trên Shared Folder (Multi-user)
+
+1. Copy toàn bộ thư mục vào shared folder
+2. **Không cần** cài đặt trên từng máy
+3. Mỗi user sẽ có log file riêng: `PDFCompressor_USERNAME_COMPUTERNAME_YYYY-MM-DD.log`
+4. **Auto-detect**: NLog tự động tạo user-specific log files
+5. **No conflicts**: Nhiều user có thể chạy đồng thời mà không bị lock file
+
+⚠️ **Yêu cầu**: Shared folder phải có quyền read/write cho tất cả users
 
 ## 📖 Sử dụng
 
@@ -127,12 +141,16 @@ dotnet run --configuration Release
 -dJPEGQ=80 -dAutoFilterColorImages=true
 ```
 
-### Logging system
+### Logging system (NLog v6.0)
 
-- **Location**: `./Logs/PDFCompressor_YYYY-MM-DD.log`
-- **Format**: `[2025-11-04 14:01:38] Đã tải file: document.pdf`
-- **Rotation**: File mới mỗi ngày
-- **Content**: Tất cả operations, errors, và system messages
+- **Multi-user Support**: Tên file theo user và computer: `PDFCompressor_USERNAME_COMPUTERNAME_YYYY-MM-DD.log`
+- **Location**: `./Logs/PDFComplier_USERNAME_COMPUTERNAME_YYYY-MM-DD.log`
+- **Format**: `2025-11-14 10:30:15 [INFO] [MainForm] Đã tải file: document.pdf`
+- **Async Logging**: Không bị lock file, performance cao
+- **Rotation**: Tự động archive sau 7 ngày
+- **Multi-target**: File + Console + Debug output
+- **Shared Folder Safe**: User-specific filenames prevent conflicts
+- **Internal Logging**: `internal-nlog.txt` cho NLog diagnostics
 
 ### File splitting algorithm
 
@@ -289,11 +307,21 @@ By using this software, you agree to comply with both the MIT License for this p
 
 ---
 
-**Phiên bản**: 1.0.1
-**Cập nhật lần cuối**: 4/11/2025
+**Phiên bản**: 1.1
+**Cập nhật lần cuối**: 14/11/2025
 **Framework**: .NET 9.0 Windows Forms
 
 ### Version History
+
+- **v1.1** (14/11/2025):
+  - 🚀 **Migrated to NLog v6.0** for professional logging system
+  - 👥 **Multi-user Support**: User-specific log filenames for shared folder environments
+  - 🔄 **Async Logging**: Non-blocking file operations, no more lock issues
+  - 📁 **Safe Shared Folder**: Each user gets separate log file with username and computer name
+  - 🗂️ **Log Rotation**: Automatic archive after 7 days, organized in archive folder
+  - 🔧 **Centralized Logger**: Unified logging interface for MainForm and GhostscriptAPI
+  - 🎯 **Improved Debugging**: Enhanced log format with timestamps, log levels, and component names
+  - 📊 **Better Performance**: Async queue-based logging system
 
 - **v1.0.1** (4/11/2025):
   - Fixed Ghostscript API -100 error by implementing poll callback
