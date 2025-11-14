@@ -5,7 +5,8 @@
       "Bash(dotnet run:*)",
       "WebFetch(domain:ghostscript.readthedocs.io)",
       "Bash(dir:*)",
-      "Bash(\"D:\\repos\\PdfCompressor-main\\Ghostscript\\gswin64c.exe\":*)"
+      "Bash(\"D:\\repos\\PdfCompressor-main\\Ghostscript\\gswin64c.exe\":*)",
+      "Bash(dotnet add:*)"
     ],
     "deny": [],
     "ask": []

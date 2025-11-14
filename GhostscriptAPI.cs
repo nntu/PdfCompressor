@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -208,37 +210,57 @@ namespace PdfCompressor
         public void Initialize()
         {
             if (_gsInstance != IntPtr.Zero)
+            {
+                Logger.InfoGhostscript("Ghostscript instance đã được khởi tạo trước đó");
                 return;
+            }
+
+            Logger.LogGhostscriptOperationStart("khởi tạo Ghostscript instance", $"DLL path: {_ghostscriptPath}");
 
             // Check if Ghostscript DLL exists
             if (!IsGhostscriptAvailable())
             {
+                Logger.LogGhostscriptError("khởi tạo", -1, $"Ghostscript DLL not found at: {_ghostscriptPath}");
                 throw new GhostscriptException($"Ghostscript DLL not found at: {_ghostscriptPath}", -1);
             }
 
             try
             {
+                Logger.InfoGhostscript("Đang tạo Ghostscript instance mới...");
                 int result = gsapi_new_instance(out _gsInstance, IntPtr.Zero);
                 if (result != GS_OK)
                 {
+                    Logger.LogGhostscriptError("tạo instance", result);
                     throw new GhostscriptException($"Failed to create Ghostscript instance. Error code: {result}", result);
                 }
 
+                Logger.InfoGhostscript("Ghostscript instance được tạo thành công");
+
                 // Set a poll callback that never interrupts to prevent -100 errors
+                Logger.InfoGhostscript("Đang thiết lập poll callback để tránh lỗi -100...");
                 PollCallBack pollFn = (caller_handle) => 0; // Always return 0 (no interrupt)
                 result = gsapi_set_poll(_gsInstance, pollFn);
                 if (result != GS_OK)
                 {
+                    Logger.LogGhostscriptError("thiết lập poll callback", result);
                     // Log warning but don't fail initialization
                     System.Diagnostics.Debug.WriteLine($"Warning: Failed to set poll callback. Error code: {result}");
                 }
+                else
+                {
+                    Logger.InfoGhostscript("Poll callback được thiết lập thành công");
+                }
+
+                Logger.LogGhostscriptOperationSuccess("khởi tạo Ghostscript instance");
             }
             catch (DllNotFoundException dllEx)
             {
+                Logger.LogGhostscriptError("khởi tạo", -1, $"DLL không thể tải: {dllEx.Message}");
                 throw new GhostscriptException($"Ghostscript DLL could not be loaded. Please ensure {_ghostscriptPath} and its dependencies are available.", -1, dllEx);
             }
             catch (Exception ex)
             {
+                Logger.LogGhostscriptError("khởi tạo", -1, ex.Message);
                 throw new GhostscriptException($"Failed to initialize Ghostscript: {ex.Message}", -1, ex);
             }
         }
@@ -250,12 +272,29 @@ namespace PdfCompressor
         public void Execute(string[] args)
         {
             if (_gsInstance == IntPtr.Zero)
-                throw new InvalidOperationException("Ghostscript instance not initialized");
-
-            int result = gsapi_init_with_args(_gsInstance, args.Length, args);
-            if (result != GS_OK && result != GS_ERROR_QUIT)
             {
-                throw new GhostscriptException($"Ghostscript execution failed. Error code: {result}", result);
+                Logger.LogGhostscriptError("thực thi", -1, "Ghostscript instance not initialized");
+                throw new InvalidOperationException("Ghostscript instance not initialized");
+            }
+
+            string argsString = string.Join(" ", args);
+            Logger.LogGhostscriptOperationStart("thực thi Ghostscript", argsString);
+
+            try
+            {
+                int result = gsapi_init_with_args(_gsInstance, args.Length, args);
+                if (result != GS_OK && result != GS_ERROR_QUIT)
+                {
+                    Logger.LogGhostscriptError("thực thi", result, argsString);
+                    throw new GhostscriptException($"Ghostscript execution failed. Error code: {result}", result);
+                }
+
+                Logger.LogGhostscriptOperationSuccess("thực thi Ghostscript", $"Result: {result}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogGhostscriptError("thực thi", -1, $"{ex.Message} - Args: {argsString}");
+                throw;
             }
         }
 
@@ -266,13 +305,29 @@ namespace PdfCompressor
         public void ExecuteString(string command)
         {
             if (_gsInstance == IntPtr.Zero)
-                throw new InvalidOperationException("Ghostscript instance not initialized");
-
-            int exitCode;
-            int result = gsapi_run_string(_gsInstance, command, 0, out exitCode);
-            if (result != GS_OK)
             {
-                throw new GhostscriptException($"Ghostscript command execution failed. Error code: {result}", result);
+                Logger.LogGhostscriptError("thực thi command", -1, "Ghostscript instance not initialized");
+                throw new InvalidOperationException("Ghostscript instance not initialized");
+            }
+
+            Logger.LogGhostscriptOperationStart("thực thi Ghostscript command", command);
+
+            try
+            {
+                int exitCode;
+                int result = gsapi_run_string(_gsInstance, command, 0, out exitCode);
+                if (result != GS_OK)
+                {
+                    Logger.LogGhostscriptError("thực thi command", result, $"Command: {command}");
+                    throw new GhostscriptException($"Ghostscript command execution failed. Error code: {result}", result);
+                }
+
+                Logger.LogGhostscriptOperationSuccess("thực thi Ghostscript command", $"Exit code: {exitCode}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogGhostscriptError("thực thi command", -1, $"{ex.Message} - Command: {command}");
+                throw;
             }
         }
 
@@ -283,13 +338,29 @@ namespace PdfCompressor
         public void ExecuteFile(string fileName)
         {
             if (_gsInstance == IntPtr.Zero)
-                throw new InvalidOperationException("Ghostscript instance not initialized");
-
-            int exitCode;
-            int result = gsapi_run_file(_gsInstance, fileName, 0, out exitCode);
-            if (result != GS_OK)
             {
-                throw new GhostscriptException($"Ghostscript file execution failed. Error code: {result}", result);
+                Logger.LogGhostscriptError("thực thi file", -1, "Ghostscript instance not initialized");
+                throw new InvalidOperationException("Ghostscript instance not initialized");
+            }
+
+            Logger.LogGhostscriptOperationStart("thực thi Ghostscript file", fileName);
+
+            try
+            {
+                int exitCode;
+                int result = gsapi_run_file(_gsInstance, fileName, 0, out exitCode);
+                if (result != GS_OK)
+                {
+                    Logger.LogGhostscriptError("thực thi file", result, $"File: {fileName}");
+                    throw new GhostscriptException($"Ghostscript file execution failed. Error code: {result}", result);
+                }
+
+                Logger.LogGhostscriptOperationSuccess("thực thi Ghostscript file", $"File: {fileName}, Exit code: {exitCode}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogGhostscriptError("thực thi file", -1, $"{ex.Message} - File: {fileName}");
+                throw;
             }
         }
 
@@ -309,8 +380,8 @@ namespace PdfCompressor
 
             return new GhostscriptRevision
             {
-                Product = revision.product,
-                Copyright = revision.copyright,
+                Product = revision.product ?? "",
+                Copyright = revision.copyright ?? "",
                 Revision = revision.revision,
                 RevisionDate = revision.revisiondate
             };
@@ -395,8 +466,21 @@ namespace PdfCompressor
         /// <param name="settings">Compression settings</param>
         public void CompressPdf(string inputPath, string outputPath, PdfCompressionSettings settings)
         {
-            var args = BuildCompressionArgs(inputPath, outputPath, settings);
-            Execute(args);
+            Logger.LogGhostscriptOperationStart("nén PDF", $"Input: {Path.GetFileName(inputPath)}, Output: {Path.GetFileName(outputPath)}");
+            Logger.InfoGhostscript($"Thiết lập nén: {settings.PdfSetting}, Chất lượng JPEG: {settings.JpegQuality}%");
+            Logger.InfoGhostscript($"Độ phân giải ảnh màu: {settings.ColorImageResolution} DPI, Ảnh xám: {settings.GrayImageResolution} DPI");
+
+            try
+            {
+                var args = BuildCompressionArgs(inputPath, outputPath, settings);
+                Execute(args);
+                Logger.LogGhostscriptOperationSuccess("nén PDF", $"File output: {Path.GetFileName(outputPath)}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogGhostscriptError("nén PDF", -1, $"{ex.Message} - Input: {inputPath}");
+                throw;
+            }
         }
 
         /// <summary>
@@ -406,8 +490,20 @@ namespace PdfCompressor
         /// <param name="outputPath">Output PDF file path</param>
         public void MergePdfFiles(string[] inputPaths, string outputPath)
         {
-            var args = BuildMergeArgs(inputPaths, outputPath);
-            Execute(args);
+            string inputFiles = string.Join(", ", inputPaths.Select(Path.GetFileName));
+            Logger.LogGhostscriptOperationStart("gộp PDF", $"Input files: {inputFiles}, Output: {Path.GetFileName(outputPath)}");
+
+            try
+            {
+                var args = BuildMergeArgs(inputPaths, outputPath);
+                Execute(args);
+                Logger.LogGhostscriptOperationSuccess("gộp PDF", $"Đã gộp {inputPaths.Length} files thành {Path.GetFileName(outputPath)}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogGhostscriptError("gộp PDF", -1, $"{ex.Message} - Files: {inputFiles}");
+                throw;
+            }
         }
 
         /// <summary>
@@ -418,18 +514,36 @@ namespace PdfCompressor
         /// <param name="pagesPerFile">Number of pages per output file</param>
         public void SplitPdfFile(string inputPath, string outputPathPattern, int pagesPerFile)
         {
-            // Get total page count first
-            int totalPages = GetPdfPageCount(inputPath);
-            int fileCount = (int)Math.Ceiling((double)totalPages / pagesPerFile);
+            Logger.LogGhostscriptOperationStart("chia PDF", $"Input: {Path.GetFileName(inputPath)}, {pagesPerFile} pages/file");
 
-            for (int i = 0; i < fileCount; i++)
+            try
             {
-                int startPage = i * pagesPerFile + 1;
-                int endPage = Math.Min((i + 1) * pagesPerFile, totalPages);
-                string outputPath = string.Format(outputPathPattern, i + 1);
+                // Get total page count first
+                int totalPages = GetPdfPageCount(inputPath);
+                int fileCount = (int)Math.Ceiling((double)totalPages / pagesPerFile);
 
-                var args = BuildSplitArgs(inputPath, outputPath, startPage, endPage);
-                Execute(args);
+                Logger.InfoGhostscript($"Phát hiện {totalPages} trang, sẽ chia thành {fileCount} files");
+
+                for (int i = 0; i < fileCount; i++)
+                {
+                    int startPage = i * pagesPerFile + 1;
+                    int endPage = Math.Min((i + 1) * pagesPerFile, totalPages);
+                    string outputPath = string.Format(outputPathPattern, i + 1);
+
+                    Logger.InfoGhostscript($"Đang tạo phần {i + 1}/{fileCount}: trang {startPage}-{endPage}");
+
+                    var args = BuildSplitArgs(inputPath, outputPath, startPage, endPage);
+                    Execute(args);
+
+                    Logger.InfoGhostscript($"Đã tạo phần {i + 1}: {Path.GetFileName(outputPath)}");
+                }
+
+                Logger.LogGhostscriptOperationSuccess("chia PDF", $"Đã chia thành {fileCount} files");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogGhostscriptError("chia PDF", -1, $"{ex.Message} - Input: {inputPath}");
+                throw;
             }
         }
 
@@ -442,8 +556,19 @@ namespace PdfCompressor
         /// <param name="endPage">Ending page number (1-based)</param>
         public void SplitPdfByPageRange(string inputPath, string outputPath, int startPage, int endPage)
         {
-            var args = BuildSplitArgs(inputPath, outputPath, startPage, endPage);
-            Execute(args);
+            Logger.LogGhostscriptOperationStart("chia PDF theo range", $"Input: {Path.GetFileName(inputPath)}, trang {startPage}-{endPage}");
+
+            try
+            {
+                var args = BuildSplitArgs(inputPath, outputPath, startPage, endPage);
+                Execute(args);
+                Logger.LogGhostscriptOperationSuccess("chia PDF theo range", $"Output: {Path.GetFileName(outputPath)}, trang {startPage}-{endPage}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogGhostscriptError("chia PDF theo range", -1, $"{ex.Message} - Input: {inputPath}, pages {startPage}-{endPage}");
+                throw;
+            }
         }
 
         /// <summary>
@@ -453,10 +578,13 @@ namespace PdfCompressor
         /// <returns>Number of pages</returns>
         public int GetPdfPageCount(string inputPath)
         {
+            Logger.LogGhostscriptOperationStart("đếm trang PDF", Path.GetFileName(inputPath));
+
             try
             {
                 // Method 1: Try using Ghostscript script
                 string script = $"({inputPath}) (r) file runpdfbegin pdfpagecount runpdfend == flush";
+                Logger.InfoGhostscript($"Thực thi script đếm trang: {script}");
 
                 // Capture output using stdio callback
                 string output = "";
@@ -475,16 +603,22 @@ namespace PdfCompressor
 
                 if (int.TryParse(output.Trim(), out int pageCount))
                 {
+                    Logger.LogGhostscriptOperationSuccess("đếm trang PDF", $"{pageCount} trang");
                     return pageCount;
                 }
+                else
+                {
+                    Logger.InfoGhostscript("Không thể parse kết quả đếm trang, sử dụng giá trị mặc định");
+                }
             }
-            catch
+            catch (Exception ex)
             {
-                // Fallback to process-based method
+                Logger.LogGhostscriptError("đếm trang PDF", -1, $"{ex.Message} - Sử dụng giá trị mặc định");
             }
 
             // Fallback method: Return a reasonable default
             // In a production environment, you'd want to implement proper page counting
+            Logger.InfoGhostscript("Sử dụng giá trị mặc định: 10 trang");
             return 10; // Default fallback for page count
         }
 
@@ -588,26 +722,38 @@ namespace PdfCompressor
         {
             if (!_disposed && _gsInstance != IntPtr.Zero)
             {
+                Logger.InfoGhostscript("Đang dọn dẹp Ghostscript instance...");
+
                 try
                 {
-                    gsapi_exit(_gsInstance);
+                    int result = gsapi_exit(_gsInstance);
+                    if (result == GS_OK)
+                    {
+                        Logger.InfoGhostscript("Ghostscript instance exit thành công");
+                    }
+                    else
+                    {
+                        Logger.LogGhostscriptError("dispose - exit", result);
+                    }
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Ignore cleanup errors
+                    Logger.LogGhostscriptError("dispose - exit", -1, ex.Message);
                 }
 
                 try
                 {
                     gsapi_delete_instance(_gsInstance);
+                    Logger.InfoGhostscript("Ghostscript instance đã được xóa");
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Ignore cleanup errors
+                    Logger.LogGhostscriptError("dispose - delete", -1, ex.Message);
                 }
 
                 _gsInstance = IntPtr.Zero;
                 _disposed = true;
+                Logger.InfoGhostscript("Ghostscript API đã được dispose thành công");
             }
         }
 

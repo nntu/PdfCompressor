@@ -83,36 +83,18 @@ public partial class MainForm : Form
 
     private void LogMessage(string message)
     {
+        // Log to NLog (file, console, debug)
+        Logger.InfoMainForm(message);
+
+        // Also update UI if needed
         if (logTextBox.InvokeRequired)
         {
             logTextBox.Invoke(new Action<string>(LogMessage), message);
             return;
         }
 
-        var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-        var logEntry = $"[{timestamp}] {message}";
-
         // Add to UI
         logTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\r\n");
-
-        // Save to file
-        SaveLogToFile(logEntry);
-    }
-
-    private void SaveLogToFile(string logEntry)
-    {
-        try
-        {
-            var logsDirectory = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-            var logFileName = $"PDFCompressor_{DateTime.Now:yyyy-MM-dd}.log";
-            var logFilePath = System.IO.Path.Combine(logsDirectory, logFileName);
-
-            System.IO.File.AppendAllText(logFilePath, logEntry + Environment.NewLine);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"Error saving log to file: {ex.Message}");
-        }
     }
 
     private void selectFileButton_Click(object sender, EventArgs e)
@@ -349,6 +331,7 @@ public partial class MainForm : Form
             var compressionRatio = (1 - (double)compressedSize / originalSize) * 100;
 
             LogMessage($"Nén thành công!");
+            LogMessage($"File kết quả: {outputPath}");
             LogMessage($"Kích thước gốc: {FormatFileSize(originalSize)}");
             LogMessage($"Kích thước sau nén: {FormatFileSize(compressedSize)}");
             LogMessage($"Tỷ lệ nén: {compressionRatio:F1}%");
@@ -473,7 +456,7 @@ public partial class MainForm : Form
         }
 
         arguments += $" -sOutputFile=\"{outputPath}\" \"{inputPath}\"";
-
+        LogMessage($"Ghostscript arguments: {arguments}");
         return arguments;
     }
 
@@ -836,7 +819,7 @@ public partial class MainForm : Form
     {
         var version = ProduceVersion();
         this.Text = $"PDF Compressor - Tối ưu hóa file PDF (v {version})";
-
+        LogMessage($"Ứng dụng khởi động. Phiên bản: {version}");
         // Check Ghostscript availability on startup
         try
         {
@@ -861,20 +844,18 @@ public partial class MainForm : Form
 
     private void LogMergeMessage(string message)
     {
+        // Log to NLog with [MERGE] prefix
+        Logger.InfoMainForm($"[MERGE] {message}");
+
+        // Also update UI if needed
         if (mergeLogTextBox.InvokeRequired)
         {
             mergeLogTextBox.Invoke(new Action<string>(LogMergeMessage), message);
             return;
         }
 
-        var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-        var logEntry = $"[{timestamp}] {message}";
-
         // Add to UI
         mergeLogTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\r\n");
-
-        // Save to file
-        SaveLogToFile($"[MERGE] {logEntry}");
     }
 
     private void UpdateMergeProgress(int value)
