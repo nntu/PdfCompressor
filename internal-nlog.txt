@@ -1,0 +1,21 @@
+2025-11-19 13:31:58.7171 Warn Error has been raised. Exception: NLog.NLogConfigurationException: 'FileTarget' cannot assign unknown property 'concurrentWrites'='true'
+   at NLog.Config.LoggingConfigurationParser.SetPropertyValueFromString[T](T targetObject, String propertyName, String propertyValue, ValidatedConfigurationElement element)
+2025-11-19 13:31:58.7544 Info Registered target NLog.Targets.FileTarget(Name=fileTarget)
+2025-11-19 13:31:58.7544 Info Registered target NLog.Targets.Wrappers.AsyncTargetWrapper(Name=asyncFile)
+2025-11-19 13:31:58.7544 Info Registered target NLog.Targets.ConsoleTarget(Name=consoleTarget)
+2025-11-19 13:31:58.7544 Info Registered target NLog.Targets.DebuggerTarget(Name=debuggerTarget)
+2025-11-19 13:31:58.7544 Info NLog, Version=6.0.0.0, Culture=neutral, PublicKeyToken=5120e14c03d0593c. File version: 6.0.6.4706. Product version: 6.0.6+1913a823347d47c0b004ce714af74436261daf20. GlobalAssemblyCache: False
+2025-11-19 13:31:58.8072 Info Configuration initialized: TargetNames=asyncFile, consoleTarget, debuggerTarget, ConfigItems=49, AutoReload=true, FilePath=D:\repos\PdfCompressor\bin\Debug\net9.0-windows\NLog.config
+2025-11-19 13:33:22.9475 Warn Error has been raised. Exception: NLog.NLogConfigurationException: 'FileTarget' cannot assign unknown property 'concurrentWrites'='true'
+   at NLog.Config.LoggingConfigurationParser.SetPropertyValueFromString[T](T targetObject, String propertyName, String propertyValue, ValidatedConfigurationElement element)
+2025-11-19 13:33:22.9891 Info Registered target NLog.Targets.FileTarget(Name=fileTarget)
+2025-11-19 13:33:22.9891 Info Registered target NLog.Targets.Wrappers.AsyncTargetWrapper(Name=asyncFile)
+2025-11-19 13:33:22.9891 Info Registered target NLog.Targets.ConsoleTarget(Name=consoleTarget)
+2025-11-19 13:33:22.9891 Info Registered target NLog.Targets.DebuggerTarget(Name=debuggerTarget)
+2025-11-19 13:33:22.9891 Info NLog, Version=6.0.0.0, Culture=neutral, PublicKeyToken=5120e14c03d0593c. File version: 6.0.6.4706. Product version: 6.0.6+1913a823347d47c0b004ce714af74436261daf20. GlobalAssemblyCache: False
+2025-11-19 13:33:23.0441 Info Configuration initialized: TargetNames=asyncFile, consoleTarget, debuggerTarget, ConfigItems=49, AutoReload=true, FilePath=D:\repos\PdfCompressor\bin\Debug\net9.0-windows\NLog.config
+2025-11-19 13:36:06.7153 Info LogFactory shutting down ...
+2025-11-19 13:36:06.7153 Info Closing old configuration.
+2025-11-19 13:36:06.7233 Info LogFactory shutdown completed.
+2025-11-19 13:36:06.7233 Info AppDomain Shutting down. LogFactory closing...
+2025-11-19 13:36:06.7233 Info LogFactory has been disposed.

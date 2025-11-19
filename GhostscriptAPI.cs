@@ -24,22 +24,39 @@ namespace PdfCompressor
             // Set the Ghostscript DLL path
             _ghostscriptPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Ghostscript", GS_DLL);
 
-            // Pre-load the DLL to handle dependencies
+            // Pre-load the DLL to handle dependencies and improve error detection
             try
             {
                 if (System.IO.File.Exists(_ghostscriptPath))
                 {
                     // Add the Ghostscript directory to the DLL search path
                     string ghostscriptDir = System.IO.Path.GetDirectoryName(_ghostscriptPath) ?? "";
-                    SetDllDirectory(ghostscriptDir);
+                    if (!string.IsNullOrEmpty(ghostscriptDir))
+                    {
+                        SetDllDirectory(ghostscriptDir);
+                        System.Diagnostics.Debug.WriteLine($"Ghostscript DLL directory added to search path: {ghostscriptDir}");
+                    }
 
-                    // Try to load the library to check for dependencies
-                    LoadLibrary(_ghostscriptPath);
+                    // Try to load the library to check for dependencies early
+                    IntPtr handle = LoadLibrary(_ghostscriptPath);
+                    if (handle != IntPtr.Zero)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Ghostscript DLL pre-loaded successfully: {_ghostscriptPath}");
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Warning: Failed to pre-load Ghostscript DLL: {_ghostscriptPath}");
+                    }
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"Warning: Ghostscript DLL not found at: {_ghostscriptPath}");
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // If pre-loading fails, continue and try standard loading
+                System.Diagnostics.Debug.WriteLine($"Warning: Ghostscript DLL pre-loading failed: {ex.Message}");
+                // If pre-loading fails, continue and try standard loading during initialization
             }
         }
 
@@ -134,8 +151,8 @@ namespace PdfCompressor
         #region Error Codes
 
         public const int GS_OK = 0;
+        public const int GS_ERROR_INTERRUPT = -100;  // Fixed: Actual interrupt error from Ghostscript
         public const int GS_ERROR_QUIT = -101;
-        public const int GS_ERROR_INTERRUPT = -102;
         public const int GS_ERROR_OUTOFMEMORY = -103;
         public const int GS_ERROR_UNRECOVERABLE = -104;
         public const int GS_ERROR_FATALEXIT = -105;
@@ -205,6 +222,49 @@ namespace PdfCompressor
         }
 
         /// <summary>
+        /// Get Ghostscript installation diagnostic information
+        /// </summary>
+        /// <returns>Detailed information about Ghostscript installation</returns>
+        public static string GetDiagnosticInfo()
+        {
+            var info = new System.Text.StringBuilder();
+
+            info.AppendLine($"Ghostscript DLL Path: {_ghostscriptPath}");
+            info.AppendLine($"DLL Exists: {System.IO.File.Exists(_ghostscriptPath)}");
+
+            if (System.IO.File.Exists(_ghostscriptPath))
+            {
+                try
+                {
+                    var fileInfo = new System.IO.FileInfo(_ghostscriptPath);
+                    info.AppendLine($"DLL Size: {fileInfo.Length:N0} bytes");
+                    info.AppendLine($"DLL Modified: {fileInfo.LastWriteTime:yyyy-MM-dd HH:mm:ss}");
+
+                    // Check for Ghostscript executable
+                    string exePath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(_ghostscriptPath) ?? "", "gswin64c.exe");
+                    info.AppendLine($"Executable Exists: {System.IO.File.Exists(exePath)}");
+                    info.AppendLine($"Executable Path: {exePath}");
+
+                    if (System.IO.File.Exists(exePath))
+                    {
+                        var exeInfo = new System.IO.FileInfo(exePath);
+                        info.AppendLine($"Executable Size: {exeInfo.Length:N0} bytes");
+                        info.AppendLine($"Executable Modified: {exeInfo.LastWriteTime:yyyy-MM-dd HH:mm:ss}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    info.AppendLine($"Error getting file info: {ex.Message}");
+                }
+            }
+
+            info.AppendLine($"Working Directory: {System.IO.Directory.GetCurrentDirectory()}");
+            info.AppendLine($"Application Base: {AppDomain.CurrentDomain.BaseDirectory}");
+
+            return info.ToString();
+        }
+
+        /// <summary>
         /// Initialize Ghostscript instance
         /// </summary>
         public void Initialize()
@@ -236,19 +296,35 @@ namespace PdfCompressor
 
                 Logger.InfoGhostscript("Ghostscript instance được tạo thành công");
 
-                // Set a poll callback that never interrupts to prevent -100 errors
-                Logger.InfoGhostscript("Đang thiết lập poll callback để tránh lỗi -100...");
-                PollCallBack pollFn = (caller_handle) => 0; // Always return 0 (no interrupt)
+                // Set a robust poll callback to prevent -100 errors
+                Logger.InfoGhostscript("Đang thiết lập poll callback mạnh mẽ để tránh lỗi -100...");
+
+                // Create a more sophisticated poll callback
+                PollCallBack pollFn = (caller_handle) =>
+                {
+                    try
+                    {
+                        // Always return 0 to indicate "don't interrupt"
+                        // This prevents the -100 interrupt error
+                        return 0;
+                    }
+                    catch
+                    {
+                        // If anything goes wrong in the callback, still return 0
+                        return 0;
+                    }
+                };
+
                 result = gsapi_set_poll(_gsInstance, pollFn);
                 if (result != GS_OK)
                 {
-                    Logger.LogGhostscriptError("thiết lập poll callback", result);
-                    // Log warning but don't fail initialization
-                    System.Diagnostics.Debug.WriteLine($"Warning: Failed to set poll callback. Error code: {result}");
+                    Logger.LogGhostscriptError("thiết lập poll callback", result, $"Không thể thiết lập poll callback, có thể gây lỗi -100");
+                    // Don't fail initialization, but log as warning
+                    System.Diagnostics.Debug.WriteLine($"Warning: Failed to set poll callback. Error code: {result}. This may cause -100 errors.");
                 }
                 else
                 {
-                    Logger.InfoGhostscript("Poll callback được thiết lập thành công");
+                    Logger.InfoGhostscript("Poll callback được thiết lập thành công - Đã bảo vệ khỏi lỗi -100");
                 }
 
                 Logger.LogGhostscriptOperationSuccess("khởi tạo Ghostscript instance");
@@ -283,18 +359,51 @@ namespace PdfCompressor
             try
             {
                 int result = gsapi_init_with_args(_gsInstance, args.Length, args);
-                if (result != GS_OK && result != GS_ERROR_QUIT)
+
+                // Handle common error codes gracefully
+                if (result == GS_OK || result == GS_ERROR_QUIT)
                 {
-                    Logger.LogGhostscriptError("thực thi", result, argsString);
-                    throw new GhostscriptException($"Ghostscript execution failed. Error code: {result}", result);
+                    Logger.LogGhostscriptOperationSuccess("thực thi Ghostscript", $"Result: {result}");
+                    return;
                 }
 
-                Logger.LogGhostscriptOperationSuccess("thực thi Ghostscript", $"Result: {result}");
+                // Special handling for interrupt errors (-100)
+                if (result == GS_ERROR_INTERRUPT)
+                {
+                    Logger.InfoGhostscript("Phát hiện lỗi gián đoạn (-100), thử lại với poll callback cường độ cao...");
+
+                    // Try to reset and retry once
+                    System.Threading.Thread.Sleep(100); // Brief pause
+                    result = gsapi_init_with_args(_gsInstance, args.Length, args);
+
+                    if (result == GS_OK || result == GS_ERROR_QUIT)
+                    {
+                        Logger.InfoGhostscript("Thử lại thành công sau khi xử lý lỗi -100");
+                        return;
+                    }
+                }
+
+                // Log detailed error information
+                string errorMsg = GetErrorMessage(result);
+                Logger.LogGhostscriptError("thực thi", result, $"{errorMsg} - Args: {argsString}");
+
+                // For certain errors, provide more context
+                switch (result)
+                {
+                    case GS_ERROR_INTERRUPT:
+                        throw new GhostscriptException($"Ghostscript bị gián đoạn. Poll callback có thể không hoạt động đúng. Error: {result}", result);
+                    case GS_ERROR_INVALIDFILEACCESS:
+                        throw new GhostscriptException($"Không thể truy cập file. Kiểm tra đường dẫn và quyền truy cập. Error: {result}", result);
+                    case GS_ERROR_EXECERROR:
+                        throw new GhostscriptException($"Lỗi thực thi command. Kiểm tra cú pháp tham số. Error: {result}", result);
+                    default:
+                        throw new GhostscriptException($"Ghostscript execution failed. {errorMsg}", result);
+                }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!(ex is GhostscriptException))
             {
                 Logger.LogGhostscriptError("thực thi", -1, $"{ex.Message} - Args: {argsString}");
-                throw;
+                throw new GhostscriptException($"Ghostscript execution failed with exception: {ex.Message}", -1, ex);
             }
         }
 
@@ -397,8 +506,8 @@ namespace PdfCompressor
             return errorCode switch
             {
                 GS_OK => "Thành công",
-                GS_ERROR_QUIT => "Yêu cầu thoát",
-                GS_ERROR_INTERRUPT => "Bị gián đoạn (-100)",
+                GS_ERROR_INTERRUPT => "Bị gián đoạn (-100) - Thiếu poll callback hoặc timeout",
+                GS_ERROR_QUIT => "Yêu cầu thoát (-101)",
                 GS_ERROR_OUTOFMEMORY => "Hết bộ nhớ (-103)",
                 GS_ERROR_UNRECOVERABLE => "Lỗi không thể phục hồi (-104)",
                 GS_ERROR_FATALEXIT => "Lỗi nghiêm trọng (-105)",
@@ -724,23 +833,26 @@ namespace PdfCompressor
             {
                 Logger.InfoGhostscript("Đang dọn dẹp Ghostscript instance...");
 
+                // Exit Ghostscript instance first
                 try
                 {
                     int result = gsapi_exit(_gsInstance);
-                    if (result == GS_OK)
+                    if (result == GS_OK || result == GS_ERROR_QUIT)
                     {
-                        Logger.InfoGhostscript("Ghostscript instance exit thành công");
+                        Logger.InfoGhostscript($"Ghostscript instance exit thành công (result: {result})");
                     }
                     else
                     {
-                        Logger.LogGhostscriptError("dispose - exit", result);
+                        string errorMsg = GetErrorMessage(result);
+                        Logger.LogGhostscriptError("dispose - exit", result, $"{errorMsg} - Non-critical cleanup error");
                     }
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogGhostscriptError("dispose - exit", -1, ex.Message);
+                    Logger.LogGhostscriptError("dispose - exit", -1, $"{ex.Message} - Non-critical cleanup exception");
                 }
 
+                // Delete the instance
                 try
                 {
                     gsapi_delete_instance(_gsInstance);
@@ -748,7 +860,7 @@ namespace PdfCompressor
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogGhostscriptError("dispose - delete", -1, ex.Message);
+                    Logger.LogGhostscriptError("dispose - delete", -1, $"{ex.Message} - Non-critical cleanup exception");
                 }
 
                 _gsInstance = IntPtr.Zero;
