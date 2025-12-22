@@ -66,52 +66,63 @@ namespace PdfCompressor
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool SetDllDirectory(string lpPathName);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_new_instance")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_new_instance", CallingConvention = CallingConvention.Cdecl)]
         private static extern int gsapi_new_instance(out IntPtr pinstance, IntPtr caller_handle);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_init_with_args")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_init_with_args", CallingConvention = CallingConvention.Cdecl)]
         private static extern int gsapi_init_with_args(IntPtr instance, int argc, string[] argv);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_exit")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_exit", CallingConvention = CallingConvention.Cdecl)]
         private static extern int gsapi_exit(IntPtr instance);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_delete_instance")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_delete_instance", CallingConvention = CallingConvention.Cdecl)]
         private static extern void gsapi_delete_instance(IntPtr instance);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_set_stdio")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_set_stdio", CallingConvention = CallingConvention.Cdecl)]
         private static extern int gsapi_set_stdio(IntPtr instance, StdioCallBack stdin_fn, StdioCallBack stdout_fn, StdioCallBack stderr_fn);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_set_poll")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_set_poll", CallingConvention = CallingConvention.Cdecl)]
         private static extern int gsapi_set_poll(IntPtr instance, PollCallBack poll_fn);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_set_display_callback")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_set_display_callback", CallingConvention = CallingConvention.Cdecl)]
         private static extern int gsapi_set_display_callback(IntPtr instance, ref DisplayCallback callback);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_run_string_begin")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_run_string_begin", CallingConvention = CallingConvention.Cdecl)]
         private static extern int gsapi_run_string_begin(IntPtr instance, int user_errors, out int exit_code);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_run_string_continue")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_run_string_continue", CallingConvention = CallingConvention.Cdecl)]
         private static extern int gsapi_run_string_continue(IntPtr instance, string str, uint length, int user_errors, out int exit_code);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_run_string_end")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_run_string_end", CallingConvention = CallingConvention.Cdecl)]
         private static extern int gsapi_run_string_end(IntPtr instance, int user_errors, out int exit_code);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_run_file")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_run_file", CallingConvention = CallingConvention.Cdecl)]
         private static extern int gsapi_run_file(IntPtr instance, string file_name, int user_errors, out int exit_code);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_run_string")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_run_string", CallingConvention = CallingConvention.Cdecl)]
         private static extern int gsapi_run_string(IntPtr instance, string str, int user_errors, out int exit_code);
 
-        [DllImport(GS_DLL, EntryPoint = "gsapi_revision")]
+        [DllImport(GS_DLL, EntryPoint = "gsapi_revision", CallingConvention = CallingConvention.Cdecl)]
         private static extern int gsapi_revision(ref gsapi_revision_t pr, int len);
 
         #endregion
 
         #region Callbacks
 
+        // IMPORTANT:
+        // Ghostscript C API uses cdecl on Windows builds. Also, delegates passed to native code
+        // must be kept alive for as long as Ghostscript may invoke them (store as fields).
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate int StdioCallBack(IntPtr caller_handle, IntPtr str, uint len);
 
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate int PollCallBack(IntPtr caller_handle);
+
+        // Keep callback delegates alive while the instance is in use (avoid GC collecting them).
+        private PollCallBack? _pollCallback;
+        private StdioCallBack? _stdinFn;
+        private StdioCallBack? _stdoutFn;
+        private StdioCallBack? _stderrFn;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct DisplayCallback
@@ -299,8 +310,8 @@ namespace PdfCompressor
                 // Set a robust poll callback to prevent -100 errors
                 Logger.InfoGhostscript("Đang thiết lập poll callback mạnh mẽ để tránh lỗi -100...");
 
-                // Create a more sophisticated poll callback
-                PollCallBack pollFn = (caller_handle) =>
+                // Create + store poll callback (must be kept alive)
+                _pollCallback = (caller_handle) =>
                 {
                     try
                     {
@@ -315,7 +326,7 @@ namespace PdfCompressor
                     }
                 };
 
-                result = gsapi_set_poll(_gsInstance, pollFn);
+                result = gsapi_set_poll(_gsInstance, _pollCallback);
                 if (result != GS_OK)
                 {
                     Logger.LogGhostscriptError("thiết lập poll callback", result, $"Không thể thiết lập poll callback, có thể gây lỗi -100");
@@ -501,7 +512,7 @@ namespace PdfCompressor
         /// </summary>
         /// <param name="errorCode">Error code</param>
         /// <returns>Error message in Vietnamese</returns>
-        public string GetErrorMessage(int errorCode)
+        public static string GetErrorMessage(int errorCode)
         {
             return errorCode switch
             {
@@ -541,22 +552,23 @@ namespace PdfCompressor
             if (_gsInstance == IntPtr.Zero)
                 throw new InvalidOperationException("Ghostscript instance not initialized");
 
-            StdioCallBack stdinFn = (caller_handle, str, len) =>
+            // Store delegates to keep them alive while Ghostscript may call them
+            _stdinFn = (caller_handle, str, len) =>
             {
                 return stdinCallback?.Invoke(caller_handle, str, len) ?? 0;
             };
 
-            StdioCallBack stdoutFn = (caller_handle, str, len) =>
+            _stdoutFn = (caller_handle, str, len) =>
             {
                 return stdoutCallback?.Invoke(caller_handle, str, len) ?? 0;
             };
 
-            StdioCallBack stderrFn = (caller_handle, str, len) =>
+            _stderrFn = (caller_handle, str, len) =>
             {
                 return stderrCallback?.Invoke(caller_handle, str, len) ?? 0;
             };
 
-            int result = gsapi_set_stdio(_gsInstance, stdinFn, stdoutFn, stderrFn);
+            int result = gsapi_set_stdio(_gsInstance, _stdinFn, _stdoutFn, _stderrFn);
             if (result != GS_OK)
             {
                 throw new GhostscriptException($"Failed to set stdio callbacks. Error code: {result}", result);
@@ -865,6 +877,12 @@ namespace PdfCompressor
 
                 _gsInstance = IntPtr.Zero;
                 _disposed = true;
+
+                // Release delegate references (safe; native side is gone after delete_instance)
+                _pollCallback = null;
+                _stdinFn = null;
+                _stdoutFn = null;
+                _stderrFn = null;
                 Logger.InfoGhostscript("Ghostscript API đã được dispose thành công");
             }
         }

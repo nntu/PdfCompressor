@@ -255,8 +255,7 @@ namespace PdfCompressor
         {
             try
             {
-                var gsApi = new GhostscriptAPI(false);
-                string errorMessage = gsApi.GetErrorMessage(errorCode);
+                string errorMessage = GhostscriptAPI.GetErrorMessage(errorCode);
 
                 string message = $"Lỗi Ghostscript trong '{operation}': {errorMessage} (Mã: {errorCode})";
                 if (!string.IsNullOrEmpty(additionalInfo))

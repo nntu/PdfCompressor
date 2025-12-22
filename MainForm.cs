@@ -289,12 +289,9 @@ public partial class MainForm : Form
             }
             catch (GhostscriptException gsEx)
             {
-                using (var gsApi = new GhostscriptAPI(false))
-                {
-                    string errorMsg = gsApi.GetErrorMessage(gsEx.ErrorCode);
-                    LogMessage($"Lỗi Ghostscript API: {errorMsg}");
-                    LogMessage($"Chi tiết: {gsEx.Message}");
-                }
+                string errorMsg = GhostscriptAPI.GetErrorMessage(gsEx.ErrorCode);
+                LogMessage($"Lỗi Ghostscript API: {errorMsg}");
+                LogMessage($"Chi tiết: {gsEx.Message}");
 
                 // Fallback to process-based approach
                 LogMessage("Thử phương pháp thay thế (process-based)...");
@@ -321,11 +318,218 @@ public partial class MainForm : Form
             var originalSize = GetFileSize(inputPath);
             var compressedSize = GetFileSize(outputPath);
 
-            // Check if file splitting is needed
-            if (enableSplitting && compressedSize > maxSplitSizeMB * 1024 * 1024)
+            // If compression is "technically smaller" but negligible (e.g. 0.0% in logs),
+            // offer a one-time aggressive retry for scanned PDFs.
             {
-                LogMessage($"Kích thước file ({FormatFileSize(compressedSize)}) vượt quá giới hạn {maxSplitSizeMB}MB. Đang chia nhỏ...");
-                await SplitPdfFile(outputPath, maxSplitSizeMB * 1024 * 1024);
+                bool isScanned = string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase);
+                if (isScanned && originalSize > 0)
+                {
+                    var savedBytes = originalSize - compressedSize;
+                    var savedPct = ((double)savedBytes / originalSize) * 100.0;
+
+                    // Threshold: less than 1% saved is usually perceived as "no compression"
+                    if (savedPct < 1.0)
+                    {
+                        DialogResult retryResult = DialogResult.No;
+                        this.Invoke(new Action(() =>
+                        {
+                            retryResult = MessageBox.Show(
+                                $"Nén gần như không giảm dung lượng.\n\nGốc: {FormatFileSize(originalSize)}\nSau nén: {FormatFileSize(compressedSize)}\nGiảm: {savedPct:F1}%\n\nBạn có muốn thử lại chế độ nén scan mạnh hơn không?",
+                                "Nén scan không hiệu quả",
+                                MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Question);
+                        }));
+
+                        if (retryResult == DialogResult.Yes)
+                        {
+                            try
+                            {
+                                var retryTempPath = System.IO.Path.Combine(
+                                    System.IO.Path.GetDirectoryName(outputPath) ?? "",
+                                    $"{System.IO.Path.GetFileNameWithoutExtension(outputPath)}.retry.pdf");
+
+                                var aggressive = new CompressionSettings
+                                {
+                                    PdfSetting = "/screen",
+                                    ColorImageResolution = 120,
+                                    GrayImageResolution = 120,
+                                    JpegQuality = Math.Min(60, optimalSettings.JpegQuality),
+                                    UseAutoFilter = false,
+                                    UseDCTEncode = true,
+                                    DownsampleColorImages = true,
+                                    DownsampleGrayImages = true
+                                };
+
+                                LogMessage("Thử lại nén scan mạnh hơn theo yêu cầu người dùng...");
+
+                                var retryArgs = BuildIntelligentGhostscriptArguments(inputPath, retryTempPath, aggressive, true);
+                                var retryProcess = new System.Diagnostics.Process();
+                                retryProcess.StartInfo.FileName = ghostscriptPath;
+                                retryProcess.StartInfo.Arguments = retryArgs;
+                                retryProcess.StartInfo.CreateNoWindow = true;
+                                retryProcess.StartInfo.UseShellExecute = false;
+                                retryProcess.Start();
+                                retryProcess.WaitForExit();
+
+                                var retrySize = GetFileSize(retryTempPath);
+                                if (retrySize > 0 && retrySize < compressedSize)
+                                {
+                                    try
+                                    {
+                                        System.IO.File.Delete(outputPath);
+                                        System.IO.File.Move(retryTempPath, outputPath);
+                                        compressedSize = retrySize;
+                                        LogMessage($"Thử lại thành công: kích thước sau nén giảm còn {FormatFileSize(compressedSize)}");
+                                    }
+                                    catch
+                                    {
+                                        try { System.IO.File.Delete(retryTempPath); } catch { }
+                                    }
+                                }
+                                else
+                                {
+                                    try { System.IO.File.Delete(retryTempPath); } catch { }
+                                    LogMessage("Thử lại không cải thiện dung lượng.");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                LogMessage($"Retry scan compression failed: {ex.Message}");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Guard: sometimes scanned PDFs become larger after re-encoding.
+            // If that happens, retry once with a more aggressive scanned profile, and if still not smaller,
+            // warn the user and offer to delete the "compressed" output.
+            if (compressedSize >= originalSize)
+            {
+                bool isScanned = string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase);
+                if (isScanned)
+                {
+                    try
+                    {
+                        var retryTempPath = System.IO.Path.Combine(
+                            System.IO.Path.GetDirectoryName(outputPath) ?? "",
+                            $"{System.IO.Path.GetFileNameWithoutExtension(outputPath)}.retry.pdf");
+
+                        var aggressive = new CompressionSettings
+                        {
+                            PdfSetting = "/screen",
+                            ColorImageResolution = 120,
+                            GrayImageResolution = 120,
+                            JpegQuality = Math.Min(60, optimalSettings.JpegQuality),
+                            UseAutoFilter = false,
+                            UseDCTEncode = true,
+                            DownsampleColorImages = true,
+                            DownsampleGrayImages = true
+                        };
+
+                        LogMessage($"Cảnh báo: file sau nén đang lớn hơn hoặc bằng file gốc ({FormatFileSize(compressedSize)} >= {FormatFileSize(originalSize)}). Thử lại cấu hình scan mạnh hơn...");
+
+                        var retryArgs = BuildIntelligentGhostscriptArguments(inputPath, retryTempPath, aggressive, true);
+                        var retryProcess = new System.Diagnostics.Process();
+                        retryProcess.StartInfo.FileName = ghostscriptPath;
+                        retryProcess.StartInfo.Arguments = retryArgs;
+                        retryProcess.StartInfo.CreateNoWindow = true;
+                        retryProcess.StartInfo.UseShellExecute = false;
+                        retryProcess.Start();
+                        retryProcess.WaitForExit();
+
+                        var retrySize = GetFileSize(retryTempPath);
+                        if (retrySize > 0 && retrySize < compressedSize && retrySize < originalSize)
+                        {
+                            try
+                            {
+                                // Replace output with better retry result
+                                System.IO.File.Delete(outputPath);
+                                System.IO.File.Move(retryTempPath, outputPath);
+                                compressedSize = retrySize;
+                                LogMessage($"Thử lại thành công: kích thước sau nén giảm còn {FormatFileSize(compressedSize)}");
+                            }
+                            catch
+                            {
+                                // If replace fails, keep original output and clean up retry file
+                                try { System.IO.File.Delete(retryTempPath); } catch { }
+                            }
+                        }
+                        else
+                        {
+                            try { System.IO.File.Delete(retryTempPath); } catch { }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMessage($"Retry scan compression failed: {ex.Message}");
+                    }
+                }
+
+                if (compressedSize >= originalSize)
+                {
+                    LogMessage($"Cảnh báo: file sau nén không nhỏ hơn file gốc ({FormatFileSize(compressedSize)} >= {FormatFileSize(originalSize)}).");
+
+                    DialogResult keepResult = DialogResult.Yes;
+                    this.Invoke(new Action(() =>
+                    {
+                        keepResult = MessageBox.Show(
+                            $"Kết quả nén không hiệu quả (file sau nén không nhỏ hơn file gốc).\n\nGốc: {FormatFileSize(originalSize)}\nSau nén: {FormatFileSize(compressedSize)}\n\nBạn có muốn GIỮ file nén không?\n- Yes: Giữ file nén\n- No: Xóa file nén (giữ file gốc)",
+                            "Nén không giảm dung lượng",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Warning);
+                    }));
+
+                    if (keepResult == DialogResult.No)
+                    {
+                        try
+                        {
+                            System.IO.File.Delete(outputPath);
+                            compressedSize = originalSize;
+                            LogMessage("Đã xóa file nén vì dung lượng không giảm.");
+                        }
+                        catch (Exception ex)
+                        {
+                            LogMessage($"Không thể xóa file nén: {ex.Message}");
+                        }
+                    }
+                }
+            }
+
+            // After compression: if file is still large, suggest splitting (instead of auto-splitting)
+            bool didSplit = false;
+            const long MB = 1024L * 1024L;
+
+            // "Cao" threshold:
+            // - If user enabled splitting, use their limit as the threshold
+            // - Otherwise use a sensible default threshold (20MB)
+            int suggestThresholdMB = enableSplitting ? maxSplitSizeMB : 20;
+
+            // Split part size:
+            // - If user enabled splitting, split into that size
+            // - Otherwise default to 5MB parts
+            int splitPartSizeMB = enableSplitting ? maxSplitSizeMB : 5;
+
+            if (compressedSize > suggestThresholdMB * MB)
+            {
+                LogMessage($"File sau nén vẫn lớn ({FormatFileSize(compressedSize)}). Gợi ý chia file thành các phần ~{splitPartSizeMB}MB.");
+
+                DialogResult splitResult = DialogResult.No;
+                this.Invoke(new Action(() =>
+                {
+                    splitResult = MessageBox.Show(
+                        $"File sau nén vẫn còn lớn.\n\nKích thước: {FormatFileSize(compressedSize)}\nNgưỡng gợi ý: {suggestThresholdMB}MB\n\nBạn có muốn chia file thành các phần khoảng {splitPartSizeMB}MB không?",
+                        "Gợi ý chia file",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
+                }));
+
+                if (splitResult == DialogResult.Yes)
+                {
+                    LogMessage($"Người dùng chọn chia file. Đang chia nhỏ (tối đa ~{splitPartSizeMB}MB/phần)...");
+                    await SplitPdfFile(outputPath, splitPartSizeMB * MB);
+                    didSplit = true;
+                }
             }
 
             var compressionRatio = (1 - (double)compressedSize / originalSize) * 100;
@@ -342,6 +546,13 @@ public partial class MainForm : Form
             this.Invoke(new Action(() =>
             {
                 statusLabel.Text = "Nén hoàn tất!";
+
+                // If we already ran splitting, SplitPdfFile() has its own completion dialog.
+                // Avoid showing multiple popups.
+                if (didSplit)
+                {
+                    return;
+                }
 
                 var result = MessageBox.Show(
                     $"Nén hoàn tất!\n\nLoại tài liệu: {documentType}\nTối ưu hóa: {bestSetting}\n\nKích thước gốc: {FormatFileSize(originalSize)}\nKích thước sau nén: {FormatFileSize(compressedSize)}\nTỷ lệ nén: {compressionRatio:F1}%\n\nBạn có muốn mở thư mục kết quả không?",
@@ -636,12 +847,24 @@ public partial class MainForm : Form
         // Add intelligent compression settings based on document analysis
         if (optimizeForScanned || settings.DownsampleColorImages)
         {
+            // IMPORTANT: Ghostscript only downsamples if the corresponding Downsample flag is enabled.
+            arguments += " -dDownsampleColorImages=true -dColorImageDownsampleType=/Average";
             arguments += $" -dColorImageResolution={settings.ColorImageResolution}";
         }
 
         if (optimizeForScanned || settings.DownsampleGrayImages)
         {
+            arguments += " -dDownsampleGrayImages=true -dGrayImageDownsampleType=/Average";
             arguments += $" -dGrayImageResolution={settings.GrayImageResolution}";
+        }
+
+        // Scanned PDFs often contain 1-bit (mono) images; ensure we don't accidentally bloat them.
+        // (Keep mono at a sane default; user doesn't control this in UI yet.)
+        if (optimizeForScanned)
+        {
+            arguments += " -dDownsampleMonoImages=true -dMonoImageDownsampleType=/Subsample -dMonoImageResolution=300";
+            // Keep lossless-ish mono compression (commonly supported).
+            arguments += " -dMonoImageFilter=/CCITTFaxEncode";
         }
 
         // Configure image filters
@@ -1116,12 +1339,9 @@ public partial class MainForm : Form
                 }
                 catch (GhostscriptException gsEx)
                 {
-                    using (var gsErrorApi = new GhostscriptAPI(false))
-                    {
-                        string errorMsg = gsErrorApi.GetErrorMessage(gsEx.ErrorCode);
-                        LogMergeMessage($"Lỗi Ghostscript API: {errorMsg}");
-                        LogMergeMessage($"Chi tiết: {gsEx.Message}");
-                    }
+                    string errorMsg = GhostscriptAPI.GetErrorMessage(gsEx.ErrorCode);
+                    LogMergeMessage($"Lỗi Ghostscript API: {errorMsg}");
+                    LogMergeMessage($"Chi tiết: {gsEx.Message}");
 
                     // Fallback to process-based approach
                     LogMergeMessage("Thử phương pháp thay thế...");
