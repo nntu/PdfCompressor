@@ -16,6 +16,7 @@
 
 - 🧠 **Phân tích tài liệu thông minh**: Tự động nhận dạng tài liệu scan, văn bản, hoặc nội dung hỗn hợp
 - 🎯 **Tối ưu hóa thông minh**: Chọn tham số nén phù hợp nhất dựa trên loại tài liệu
+- 🧼 **Tối ưu Lossless / Hybrid**: Tùy chọn tối ưu PDF theo pipeline `mutool + qpdf` (lossless) hoặc `mutool + Ghostscript + qpdf` (hybrid)
 - 📁 **Chia nhỏ file lớn**: Tự động chia file >10MB thành các phần nhỏ hơn
 - 🌐 **Giao diện tiếng Việt**: Hoàn toàn bằng tiếng Việt, dễ sử dụng
 - 📊 **Logging nâng cao với NLog**: Hệ thống logging chuyên nghiệp, hỗ trợ multi-user
@@ -81,6 +82,24 @@ dotnet run --configuration Release
 
 ### Nâng cao
 
+#### Chế độ tối ưu Lossless / Hybrid (mutool + qpdf)
+
+- **Lossless tối ưu (mutool + qpdf)**: dọn rác + tối ưu cấu trúc PDF, nén streams/object streams, **không giảm chất lượng ảnh** (tùy file có thể không giảm nhiều, hoặc đôi khi tăng nhẹ).
+- **Hybrid (mutool + Ghostscript + qpdf)**: chạy `mutool` trước và `qpdf` sau, ở giữa dùng Ghostscript để giảm dung lượng (đặc biệt hiệu quả với tài liệu scan).
+
+**Yêu cầu**: bạn cần tự bổ sung tool vào thư mục `Tools/` cạnh file chạy ứng dụng:
+
+```
+PdfCompressor/
+├── PdfCompressor.exe
+├── Ghostscript/...
+└── Tools/
+    ├── mutool.exe
+    └── qpdf.exe
+```
+
+Nếu thiếu `mutool.exe`/`qpdf.exe`, ứng dụng sẽ báo lỗi và không chạy được 2 chế độ này.
+
 #### Phân loại tài liệu tự động
 
 - **Tài liệu scan**: File có nhiều hình ảnh, ít văn bản → Sử dụng nén mạnh
@@ -132,6 +151,13 @@ dotnet run --configuration Release
 -dColorImageResolution=150 -dGrayImageResolution=150
 -dAutoFilterColorImages=false -dColorImageFilter=/DCTEncode
 -dJPEGQ=75 -dSubsetFonts=true -dEmbedAllFonts=false
+```
+
+**Flags tối ưu bổ sung (áp dụng trong phiên bản mới):**
+```
+-dDetectDuplicateImages=true -dAutoRotatePages=/None -dOptimize=true
+-dSAFER -dDELAYSAFER -dNOPROMPT
+-dConvertCMYKImagesToRGB=true -dColorConversionStrategy=/sRGB -dPrinted=false
 ```
 
 **Tài liệu văn bản:**

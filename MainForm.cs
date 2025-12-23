@@ -11,6 +11,11 @@ public partial class MainForm : Form
     private System.Threading.Thread? compressionThread;
     private bool isCompressionRunning = false;
 
+    // External PDF optimization tools (optional; user can provide them)
+    private const string CompressionTypeLossless = "Lossless tối ưu (mutool + qpdf)";
+    private const string CompressionTypeHybrid = "Hybrid (mutool + Ghostscript + qpdf)";
+    private const string CompressionTypeAuto = "Tự động (Tốt nhất)";
+
     // Merge functionality fields
     private List<string> mergePdfFiles = new List<string>();
     private System.Threading.Thread? mergeThread;
@@ -227,7 +232,90 @@ public partial class MainForm : Form
             string bestSetting;
             CompressionSettings optimalSettings;
 
-            if (compressionType == "Tự động (Tốt nhất)")
+            // Auto propose: choose Lossless/Hybrid/Ghostscript-only based on document type, layer detection and tool availability
+            bool toolsAvailable = AreExternalToolsAvailable(out string mutoolPath, out string qpdfPath);
+            bool isLayered = IsPdfLayeredQuick(inputPath);
+            if (compressionType == CompressionTypeAuto)
+            {
+                // Compute intelligent settings (used for Ghostscript/hybrid)
+                optimalSettings = GetOptimalSettings(documentType, imageQuality);
+
+                string proposed;
+                if (isLayered)
+                {
+                    // Like FileOptimizer: layered PDFs can be broken by Ghostscript; prefer lossless tools if possible.
+                    proposed = toolsAvailable ? CompressionTypeLossless : "Ghostscript (không khuyến nghị cho PDF có layer)";
+                }
+                else if (!toolsAvailable)
+                {
+                    proposed = "Ghostscript (thiếu mutool/qpdf)";
+                }
+                else if (string.Equals(documentType, "Text Document", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Text PDFs often don't shrink much with GS; keep quality and do structure optimizations.
+                    proposed = CompressionTypeLossless;
+                }
+                else if (string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase) ||
+                         optimizeForScanned)
+                {
+                    // Best size reduction for scans.
+                    proposed = CompressionTypeHybrid;
+                }
+                else
+                {
+                    // Mixed/General: Hybrid usually helps, but keep it conservative if quality slider is high.
+                    proposed = (imageQuality >= 90) ? CompressionTypeLossless : CompressionTypeHybrid;
+                }
+
+                LogMessage($"Đề xuất tự động: {proposed}" +
+                           (isLayered ? " (phát hiện PDF có layer)" : "") +
+                           (!toolsAvailable ? " (thiếu Tools/mutool.exe hoặc Tools/qpdf.exe)" : ""));
+
+                // If we can run the proposed external pipeline, run it; otherwise continue with Ghostscript-only flow below.
+                if (proposed == CompressionTypeLossless && toolsAvailable)
+                {
+                    RunLosslessPipeline(mutoolPath, qpdfPath, inputPath, outputPath);
+                    bestSetting = CompressionTypeLossless;
+                    goto AfterCompression;
+                }
+                if (proposed == CompressionTypeHybrid && toolsAvailable)
+                {
+                    RunHybridPipeline(mutoolPath, qpdfPath, ghostscriptPath, inputPath, outputPath, optimalSettings, optimizeForScanned);
+                    bestSetting = CompressionTypeHybrid;
+                    goto AfterCompression;
+                }
+
+                // fallthrough -> Ghostscript-only flow (keeps existing behavior)
+                bestSetting = optimalSettings.PdfSetting;
+            }
+            else if (compressionType == CompressionTypeLossless || compressionType == CompressionTypeHybrid)
+            {
+                // Still compute intelligent settings (Hybrid needs it; Lossless just shows info)
+                optimalSettings = GetOptimalSettings(documentType, imageQuality);
+                bestSetting = compressionType;
+
+                if (!toolsAvailable)
+                {
+                    throw new FileNotFoundException(
+                        "Thiếu công cụ tối ưu PDF.\n\n" +
+                        "Vui lòng tạo thư mục 'Tools' cạnh file chạy (.exe) và copy:\n" +
+                        "- mutool.exe (MuPDF)\n" +
+                        "- qpdf.exe\n\n" +
+                        $"Đường dẫn kiểm tra:\n- {mutoolPath}\n- {qpdfPath}");
+                }
+
+                if (compressionType == CompressionTypeLossless)
+                {
+                    RunLosslessPipeline(mutoolPath, qpdfPath, inputPath, outputPath);
+                }
+                else
+                {
+                    RunHybridPipeline(mutoolPath, qpdfPath, ghostscriptPath, inputPath, outputPath, optimalSettings, optimizeForScanned);
+                }
+
+                goto AfterCompression;
+            }
+            else if (compressionType == CompressionTypeAuto)
             {
                 // Use intelligent settings based on document analysis
                 optimalSettings = GetOptimalSettings(documentType, imageQuality);
@@ -252,154 +340,71 @@ public partial class MainForm : Form
                 LogMessage($"Sử dụng thiết lập nén: {bestSetting}");
             }
 
-            UpdateProgress(50);
-
-            // Use GhostscriptAPI wrapper for compression
-            LogMessage("Sử dụng Ghostscript API để nén file...");
-            UpdateProgress(60);
-
-            try
+            // If we already produced output via Lossless/Hybrid branch above, skip Ghostscript-only section.
+            if (compressionType != CompressionTypeLossless && compressionType != CompressionTypeHybrid)
             {
-                if (!GhostscriptAPI.IsGhostscriptAvailable())
-                {
-                    LogMessage("Ghostscript API không sẵn có, sử dụng phương pháp thay thế...");
-                    throw new GhostscriptException("Ghostscript DLL not available", -1);
-                }
+                UpdateProgress(50);
 
-                using (var gsApi = new GhostscriptAPI())
+                // Use GhostscriptAPI wrapper for compression
+                LogMessage("Sử dụng Ghostscript API để nén file...");
+                UpdateProgress(60);
+
+                try
                 {
-                    // Create compression settings based on optimal settings
-                    var compressionSettings = new PdfCompressionSettings
+                    if (!GhostscriptAPI.IsGhostscriptAvailable())
                     {
-                        PdfSetting = optimalSettings.PdfSetting,
-                        ColorImageResolution = optimalSettings.ColorImageResolution,
-                        GrayImageResolution = optimalSettings.GrayImageResolution,
-                        JpegQuality = optimalSettings.JpegQuality,
-                        UseAutoFilter = optimalSettings.UseAutoFilter,
-                        UseDCTEncode = optimalSettings.UseDCTEncode,
-                        DownsampleColorImages = optimalSettings.DownsampleColorImages,
-                        DownsampleGrayImages = optimalSettings.DownsampleGrayImages
-                    };
+                        LogMessage("Ghostscript API không sẵn có, sử dụng phương pháp thay thế...");
+                        throw new GhostscriptException("Ghostscript DLL not available", -1);
+                    }
 
-                    gsApi.CompressPdf(inputPath, outputPath, compressionSettings);
+                    using (var gsApi = new GhostscriptAPI())
+                    {
+                        // Create compression settings based on optimal settings
+                        var compressionSettings = new PdfCompressionSettings
+                        {
+                            PdfSetting = optimalSettings.PdfSetting,
+                            ColorImageResolution = optimalSettings.ColorImageResolution,
+                            GrayImageResolution = optimalSettings.GrayImageResolution,
+                            JpegQuality = optimalSettings.JpegQuality,
+                            UseAutoFilter = optimalSettings.UseAutoFilter,
+                            UseDCTEncode = optimalSettings.UseDCTEncode,
+                            DownsampleColorImages = optimalSettings.DownsampleColorImages,
+                            DownsampleGrayImages = optimalSettings.DownsampleGrayImages
+                        };
+
+                        gsApi.CompressPdf(inputPath, outputPath, compressionSettings);
+                        UpdateProgress(90);
+
+                        LogMessage("Nén file thành công với Ghostscript API!");
+                    }
+                }
+                catch (GhostscriptException gsEx)
+                {
+                    string errorMsg = GhostscriptAPI.GetErrorMessage(gsEx.ErrorCode);
+                    LogMessage($"Lỗi Ghostscript API: {errorMsg}");
+                    LogMessage($"Chi tiết: {gsEx.Message}");
+
+                    // Fallback to process-based approach
+                    LogMessage("Thử phương pháp thay thế (process-based)...");
+
+                    // Build Ghostscript arguments with optimal compression settings
+                    var arguments = BuildIntelligentGhostscriptArguments(inputPath, outputPath, optimalSettings, optimizeForScanned);
+
+                    LogMessage("Bắt đầu nén với Ghostscript process...");
+                    UpdateProgress(70);
+
+                    RunProcessOrThrow(ghostscriptPath, arguments, "Ghostscript (process)");
+
                     UpdateProgress(90);
 
-                    LogMessage("Nén file thành công với Ghostscript API!");
+                    LogMessage("Nén file thành công với phương pháp thay thế!");
                 }
             }
-            catch (GhostscriptException gsEx)
-            {
-                string errorMsg = GhostscriptAPI.GetErrorMessage(gsEx.ErrorCode);
-                LogMessage($"Lỗi Ghostscript API: {errorMsg}");
-                LogMessage($"Chi tiết: {gsEx.Message}");
 
-                // Fallback to process-based approach
-                LogMessage("Thử phương pháp thay thế (process-based)...");
-
-                // Build Ghostscript arguments with optimal compression settings
-                var arguments = BuildIntelligentGhostscriptArguments(inputPath, outputPath, optimalSettings, optimizeForScanned);
-
-                LogMessage("Bắt đầu nén với Ghostscript process...");
-                UpdateProgress(70);
-
-                var process = new System.Diagnostics.Process();
-                process.StartInfo.FileName = ghostscriptPath;
-                process.StartInfo.Arguments = arguments;
-                process.StartInfo.CreateNoWindow = true;
-                process.StartInfo.UseShellExecute = false;
-                process.Start();
-                process.WaitForExit();
-
-                UpdateProgress(90);
-
-                LogMessage("Nén file thành công với phương pháp thay thế!");
-            }
+        AfterCompression:
 
             var originalSize = GetFileSize(inputPath);
             var compressedSize = GetFileSize(outputPath);
-
-            // If compression is "technically smaller" but negligible (e.g. 0.0% in logs),
-            // offer a one-time aggressive retry for scanned PDFs.
-            {
-                bool isScanned = string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase);
-                if (isScanned && originalSize > 0)
-                {
-                    var savedBytes = originalSize - compressedSize;
-                    var savedPct = ((double)savedBytes / originalSize) * 100.0;
-
-                    // Threshold: less than 1% saved is usually perceived as "no compression"
-                    if (savedPct < 1.0)
-                    {
-                        DialogResult retryResult = DialogResult.No;
-                        this.Invoke(new Action(() =>
-                        {
-                            retryResult = MessageBox.Show(
-                                $"Nén gần như không giảm dung lượng.\n\nGốc: {FormatFileSize(originalSize)}\nSau nén: {FormatFileSize(compressedSize)}\nGiảm: {savedPct:F1}%\n\nBạn có muốn thử lại chế độ nén scan mạnh hơn không?",
-                                "Nén scan không hiệu quả",
-                                MessageBoxButtons.YesNo,
-                                MessageBoxIcon.Question);
-                        }));
-
-                        if (retryResult == DialogResult.Yes)
-                        {
-                            try
-                            {
-                                var retryTempPath = System.IO.Path.Combine(
-                                    System.IO.Path.GetDirectoryName(outputPath) ?? "",
-                                    $"{System.IO.Path.GetFileNameWithoutExtension(outputPath)}.retry.pdf");
-
-                                var aggressive = new CompressionSettings
-                                {
-                                    PdfSetting = "/screen",
-                                    ColorImageResolution = 120,
-                                    GrayImageResolution = 120,
-                                    JpegQuality = Math.Min(60, optimalSettings.JpegQuality),
-                                    UseAutoFilter = false,
-                                    UseDCTEncode = true,
-                                    DownsampleColorImages = true,
-                                    DownsampleGrayImages = true
-                                };
-
-                                LogMessage("Thử lại nén scan mạnh hơn theo yêu cầu người dùng...");
-
-                                var retryArgs = BuildIntelligentGhostscriptArguments(inputPath, retryTempPath, aggressive, true);
-                                var retryProcess = new System.Diagnostics.Process();
-                                retryProcess.StartInfo.FileName = ghostscriptPath;
-                                retryProcess.StartInfo.Arguments = retryArgs;
-                                retryProcess.StartInfo.CreateNoWindow = true;
-                                retryProcess.StartInfo.UseShellExecute = false;
-                                retryProcess.Start();
-                                retryProcess.WaitForExit();
-
-                                var retrySize = GetFileSize(retryTempPath);
-                                if (retrySize > 0 && retrySize < compressedSize)
-                                {
-                                    try
-                                    {
-                                        System.IO.File.Delete(outputPath);
-                                        System.IO.File.Move(retryTempPath, outputPath);
-                                        compressedSize = retrySize;
-                                        LogMessage($"Thử lại thành công: kích thước sau nén giảm còn {FormatFileSize(compressedSize)}");
-                                    }
-                                    catch
-                                    {
-                                        try { System.IO.File.Delete(retryTempPath); } catch { }
-                                    }
-                                }
-                                else
-                                {
-                                    try { System.IO.File.Delete(retryTempPath); } catch { }
-                                    LogMessage("Thử lại không cải thiện dung lượng.");
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                LogMessage($"Retry scan compression failed: {ex.Message}");
-                            }
-                        }
-                    }
-                }
-            }
 
             // Guard: sometimes scanned PDFs become larger after re-encoding.
             // If that happens, retry once with a more aggressive scanned profile, and if still not smaller,
@@ -586,6 +591,212 @@ public partial class MainForm : Form
         }
     }
 
+    private void RunMutoolClean(string mutoolPath, string inputPdf, string outputPdf)
+    {
+        // mutool clean -g -z "in" "out"
+        var args = $"clean -g -z \"{inputPdf}\" \"{outputPdf}\"";
+        RunProcessOrThrow(mutoolPath, args, "mutool clean");
+    }
+
+    private void RunQpdfOptimize(string qpdfPath, string inputPdf, string outputPdf)
+    {
+        // qpdf "in" --compress-streams=y --decode-level=generalized --recompress-flate --compression-level=9 --optimize-images --object-streams=generate "out"
+        var args =
+            $"\"{inputPdf}\" " +
+            "--compress-streams=y " +
+            "--decode-level=generalized " +
+            "--recompress-flate " +
+            "--compression-level=9 " +
+            "--optimize-images " +
+            "--object-streams=generate " +
+            $"\"{outputPdf}\"";
+        RunProcessOrThrow(qpdfPath, args, "qpdf optimize");
+    }
+
+    private void RunProcessOrThrow(string exePath, string arguments, string label)
+    {
+        var process = new System.Diagnostics.Process();
+        process.StartInfo.FileName = exePath;
+        process.StartInfo.Arguments = arguments;
+        process.StartInfo.CreateNoWindow = true;
+        process.StartInfo.UseShellExecute = false;
+        process.StartInfo.RedirectStandardOutput = true;
+        process.StartInfo.RedirectStandardError = true;
+        process.StartInfo.StandardOutputEncoding = System.Text.Encoding.UTF8;
+        process.StartInfo.StandardErrorEncoding = System.Text.Encoding.UTF8;
+
+        LogMessage($"Thực thi {label}: {System.IO.Path.GetFileName(exePath)} {arguments}");
+
+        var stdoutBuffer = new System.Text.StringBuilder();
+        var stderrBuffer = new System.Text.StringBuilder();
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (!string.IsNullOrEmpty(e.Data))
+            {
+                stdoutBuffer.AppendLine(e.Data);
+            }
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (!string.IsNullOrEmpty(e.Data))
+            {
+                stderrBuffer.AppendLine(e.Data);
+            }
+        };
+
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        process.WaitForExit();
+
+        string stdout = stdoutBuffer.ToString();
+        string stderr = stderrBuffer.ToString();
+
+        if (!string.IsNullOrWhiteSpace(stdout))
+        {
+            LogMessage($"{label} stdout: {stdout.Trim()}");
+        }
+        if (!string.IsNullOrWhiteSpace(stderr))
+        {
+            LogMessage($"{label} stderr: {stderr.Trim()}");
+        }
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"{label} thất bại (ExitCode={process.ExitCode}).");
+        }
+    }
+
+    private bool AreExternalToolsAvailable(out string mutoolPath, out string qpdfPath)
+    {
+        var toolsDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Tools");
+        mutoolPath = System.IO.Path.Combine(toolsDir, "mutool.exe");
+        qpdfPath = System.IO.Path.Combine(toolsDir, "qpdf.exe");
+        return System.IO.File.Exists(mutoolPath) && System.IO.File.Exists(qpdfPath);
+    }
+
+    private void RunLosslessPipeline(string mutoolPath, string qpdfPath, string inputPath, string outputPath)
+    {
+        string tmpMutoolOut = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid():N}.mutool.pdf");
+        try
+        {
+            LogMessage("Bước 1: mutool clean (lossless)...");
+            UpdateProgress(25);
+            RunMutoolClean(mutoolPath, inputPath, tmpMutoolOut);
+
+            LogMessage("Bước 2: qpdf optimize (lossless)...");
+            UpdateProgress(70);
+            RunQpdfOptimize(qpdfPath, tmpMutoolOut, outputPath);
+            UpdateProgress(90);
+            LogMessage("Hoàn tất tối ưu lossless (mutool + qpdf).");
+        }
+        finally
+        {
+            try { if (System.IO.File.Exists(tmpMutoolOut)) System.IO.File.Delete(tmpMutoolOut); } catch { }
+        }
+    }
+
+    private void RunHybridPipeline(
+        string mutoolPath,
+        string qpdfPath,
+        string ghostscriptPath,
+        string inputPath,
+        string outputPath,
+        CompressionSettings optimalSettings,
+        bool optimizeForScanned)
+    {
+        string tmpMutoolOut = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid():N}.mutool.pdf");
+        string tmpGsOut = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid():N}.gs.pdf");
+
+        try
+        {
+            LogMessage("Bước 1: mutool clean (lossless)...");
+            UpdateProgress(25);
+            RunMutoolClean(mutoolPath, inputPath, tmpMutoolOut);
+
+            LogMessage($"Bước 2: Ghostscript nén (profile: {optimalSettings.PdfSetting})...");
+            UpdateProgress(45);
+
+            // Try GhostscriptAPI first, fallback to process-based
+            try
+            {
+                if (!GhostscriptAPI.IsGhostscriptAvailable())
+                {
+                    throw new GhostscriptException("Ghostscript DLL not available", -1);
+                }
+
+                using (var gsApi = new GhostscriptAPI())
+                {
+                    var compressionSettings = new PdfCompressionSettings
+                    {
+                        PdfSetting = optimalSettings.PdfSetting,
+                        ColorImageResolution = optimalSettings.ColorImageResolution,
+                        GrayImageResolution = optimalSettings.GrayImageResolution,
+                        JpegQuality = optimalSettings.JpegQuality,
+                        UseAutoFilter = optimalSettings.UseAutoFilter,
+                        UseDCTEncode = optimalSettings.UseDCTEncode,
+                        DownsampleColorImages = optimalSettings.DownsampleColorImages,
+                        DownsampleGrayImages = optimalSettings.DownsampleGrayImages
+                    };
+
+                    gsApi.CompressPdf(tmpMutoolOut, tmpGsOut, compressionSettings);
+                }
+            }
+            catch (GhostscriptException gsEx)
+            {
+                string errorMsg = GhostscriptAPI.GetErrorMessage(gsEx.ErrorCode);
+                LogMessage($"Lỗi Ghostscript API: {errorMsg}");
+                LogMessage("Fallback: chạy Ghostscript dạng process...");
+
+                var arguments = BuildIntelligentGhostscriptArguments(tmpMutoolOut, tmpGsOut, optimalSettings, optimizeForScanned);
+                RunProcessOrThrow(ghostscriptPath, arguments, "Ghostscript (process)");
+            }
+
+            LogMessage("Bước 3: qpdf optimize (lossless)...");
+            UpdateProgress(75);
+            RunQpdfOptimize(qpdfPath, tmpGsOut, outputPath);
+            UpdateProgress(90);
+            LogMessage("Hoàn tất tối ưu Hybrid (mutool + Ghostscript + qpdf).");
+        }
+        finally
+        {
+            try { if (System.IO.File.Exists(tmpMutoolOut)) System.IO.File.Delete(tmpMutoolOut); } catch { }
+            try { if (System.IO.File.Exists(tmpGsOut)) System.IO.File.Delete(tmpGsOut); } catch { }
+        }
+    }
+
+    private bool IsPdfLayeredQuick(string filePath)
+    {
+        // Detect common layer/OCG markers: /OCProperties /OCG /OCGs
+        // Read a limited chunk to avoid heavy IO.
+        try
+        {
+            const int maxBytes = 4 * 1024 * 1024; // 4MB should be enough for header/xref of many PDFs
+            byte[] data;
+            using (var fs = new System.IO.FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                int toRead = (int)Math.Min(fs.Length, maxBytes);
+                data = new byte[toRead];
+                int read = fs.Read(data, 0, toRead);
+                if (read <= 0) return false;
+                if (read != toRead)
+                {
+                    Array.Resize(ref data, read);
+                }
+            }
+
+            // PDFs are mostly ASCII tokens; ISO-8859-1 decoding is safe for byte->char mapping.
+            string s = System.Text.Encoding.Latin1.GetString(data);
+            return s.Contains("/OCProperties", StringComparison.Ordinal) ||
+                   s.Contains("/OCG", StringComparison.Ordinal) ||
+                   s.Contains("/OCGs", StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private void UpdateProgress(int value)
     {
         if (progressBar.InvokeRequired)
@@ -653,7 +864,13 @@ public partial class MainForm : Form
 
     private string BuildGhostscriptArguments(string inputPath, string outputPath, string pdfSetting, int imageQuality, bool optimizeForScanned)
     {
-        var arguments = $"-sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS={pdfSetting} -dNOPAUSE -dQUIET -dBATCH";
+        var arguments =
+            $"-sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS={pdfSetting} " +
+            "-dNOPAUSE -dQUIET -dBATCH " +
+            // Extra optimization flags (inspired by FileOptimizer pipeline)
+            "-dSAFER -dDELAYSAFER -dNOPROMPT " +
+            "-dDetectDuplicateImages=true -dAutoRotatePages=/None -dOptimize=true " +
+            "-dConvertCMYKImagesToRGB=true -dColorConversionStrategy=/sRGB -dPrinted=false";
 
         // Add image compression settings for scanned documents
         if (optimizeForScanned)
@@ -842,7 +1059,13 @@ public partial class MainForm : Form
 
     private string BuildIntelligentGhostscriptArguments(string inputPath, string outputPath, CompressionSettings settings, bool optimizeForScanned)
     {
-        var arguments = $"-sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS={settings.PdfSetting} -dNOPAUSE -dQUIET -dBATCH";
+        var arguments =
+            $"-sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS={settings.PdfSetting} " +
+            "-dNOPAUSE -dQUIET -dBATCH " +
+            // Extra optimization flags (inspired by FileOptimizer pipeline)
+            "-dSAFER -dDELAYSAFER -dNOPROMPT " +
+            "-dDetectDuplicateImages=true -dAutoRotatePages=/None -dOptimize=true " +
+            "-dConvertCMYKImagesToRGB=true -dColorConversionStrategy=/sRGB -dPrinted=false";
 
         // Add intelligent compression settings based on document analysis
         if (optimizeForScanned || settings.DownsampleColorImages)

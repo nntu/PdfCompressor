@@ -234,7 +234,7 @@ partial class MainForm
         // 
         comboBoxCompressionType.DropDownStyle = ComboBoxStyle.DropDownList;
         comboBoxCompressionType.FormattingEnabled = true;
-        comboBoxCompressionType.Items.AddRange(new object[] { "Tự động (Tốt nhất)", "Screen (Thấp nhất)", "Ebook (Thấp)", "Printer (Cao)", "Prepress (Cao nhất)", "Mặc định" });
+        comboBoxCompressionType.Items.AddRange(new object[] { "Tự động (Tốt nhất)", "Lossless tối ưu (mutool + qpdf)", "Hybrid (mutool + Ghostscript + qpdf)", "Screen (Thấp nhất)", "Ebook (Thấp)", "Printer (Cao)", "Prepress (Cao nhất)", "Mặc định" });
         comboBoxCompressionType.Location = new Point(15, 45);
         comboBoxCompressionType.Name = "comboBoxCompressionType";
         comboBoxCompressionType.Size = new Size(200, 23);

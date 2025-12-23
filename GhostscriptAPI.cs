@@ -758,6 +758,16 @@ namespace PdfCompressor
                 "-sDEVICE=pdfwrite",
                 $"-dCompatibilityLevel=1.4",
                 $"-dPDFSETTINGS={settings.PdfSetting}",
+                // Extra optimization flags (inspired by FileOptimizer pipeline)
+                "-dSAFER",
+                "-dDELAYSAFER",
+                "-dNOPROMPT",
+                "-dDetectDuplicateImages=true",
+                "-dAutoRotatePages=/None",
+                "-dOptimize=true",
+                "-dConvertCMYKImagesToRGB=true",
+                "-dColorConversionStrategy=/sRGB",
+                "-dPrinted=false",
                 $"-sOutputFile={outputPath}"
             };
 
