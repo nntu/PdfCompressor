@@ -361,4 +361,15 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Project specific ignores
 chrome-win/
+test/
+
+# Codebase knowledge graph & AI agent cache
+.codebase-memory/
+
+# Temporary & backup files
+*.tmp.*
+*.retry.*
+*.backup.*

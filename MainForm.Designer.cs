@@ -1,4 +1,4 @@
-﻿namespace PdfCompressor;
+namespace PdfCompressor;
 
 partial class MainForm
 {
@@ -38,6 +38,8 @@ partial class MainForm
         tabProgram = new TabPage();
         logTextBox = new TextBox();
         groupBoxCompressionSettings = new GroupBox();
+        labelScanColorMode = new Label();
+        comboBoxScanColorMode = new ComboBox();
         checkBoxOptimizeForScanned = new CheckBox();
         labelQualityValue = new Label();
         trackBarImageQuality = new TrackBar();
@@ -167,6 +169,8 @@ partial class MainForm
         // 
         // groupBoxCompressionSettings
         // 
+        groupBoxCompressionSettings.Controls.Add(labelScanColorMode);
+        groupBoxCompressionSettings.Controls.Add(comboBoxScanColorMode);
         groupBoxCompressionSettings.Controls.Add(checkBoxOptimizeForScanned);
         groupBoxCompressionSettings.Controls.Add(labelQualityValue);
         groupBoxCompressionSettings.Controls.Add(trackBarImageQuality);
@@ -175,27 +179,47 @@ partial class MainForm
         groupBoxCompressionSettings.Controls.Add(comboBoxCompressionType);
         groupBoxCompressionSettings.Location = new Point(410, 12);
         groupBoxCompressionSettings.Name = "groupBoxCompressionSettings";
-        groupBoxCompressionSettings.Size = new Size(360, 200);
+        groupBoxCompressionSettings.Size = new Size(360, 210);
         groupBoxCompressionSettings.TabIndex = 4;
         groupBoxCompressionSettings.TabStop = false;
         groupBoxCompressionSettings.Text = "Cài đặt nén";
+        // 
+        // labelScanColorMode
+        // 
+        labelScanColorMode.AutoSize = true;
+        labelScanColorMode.Location = new Point(15, 175);
+        labelScanColorMode.Name = "labelScanColorMode";
+        labelScanColorMode.Size = new Size(84, 15);
+        labelScanColorMode.TabIndex = 6;
+        labelScanColorMode.Text = "Màu bản scan:";
+        // 
+        // comboBoxScanColorMode
+        // 
+        comboBoxScanColorMode.DropDownStyle = ComboBoxStyle.DropDownList;
+        comboBoxScanColorMode.FormattingEnabled = true;
+        comboBoxScanColorMode.Items.AddRange(new object[] { "Tự động (Auto)", "Giữ màu (Con dấu, chữ ký)", "Ảnh xám (Grayscale - Tiết kiệm)", "Đen trắng (Monochrome - Siêu nén)" });
+        comboBoxScanColorMode.Location = new Point(105, 172);
+        comboBoxScanColorMode.Name = "comboBoxScanColorMode";
+        comboBoxScanColorMode.Size = new Size(240, 23);
+        comboBoxScanColorMode.TabIndex = 7;
         // 
         // checkBoxOptimizeForScanned
         // 
         checkBoxOptimizeForScanned.AutoSize = true;
         checkBoxOptimizeForScanned.Checked = true;
         checkBoxOptimizeForScanned.CheckState = CheckState.Checked;
-        checkBoxOptimizeForScanned.Location = new Point(15, 150);
+        checkBoxOptimizeForScanned.Location = new Point(15, 145);
         checkBoxOptimizeForScanned.Name = "checkBoxOptimizeForScanned";
         checkBoxOptimizeForScanned.Size = new Size(148, 19);
         checkBoxOptimizeForScanned.TabIndex = 5;
         checkBoxOptimizeForScanned.Text = "Tối ưu cho tài liệu scan";
         checkBoxOptimizeForScanned.UseVisualStyleBackColor = true;
+        checkBoxOptimizeForScanned.CheckedChanged += checkBoxOptimizeForScanned_CheckedChanged;
         // 
         // labelQualityValue
         // 
         labelQualityValue.AutoSize = true;
-        labelQualityValue.Location = new Point(220, 108);
+        labelQualityValue.Location = new Point(285, 96);
         labelQualityValue.Name = "labelQualityValue";
         labelQualityValue.Size = new Size(29, 15);
         labelQualityValue.TabIndex = 4;
@@ -203,11 +227,11 @@ partial class MainForm
         // 
         // trackBarImageQuality
         // 
-        trackBarImageQuality.Location = new Point(15, 100);
+        trackBarImageQuality.Location = new Point(15, 90);
         trackBarImageQuality.Maximum = 100;
         trackBarImageQuality.Minimum = 10;
         trackBarImageQuality.Name = "trackBarImageQuality";
-        trackBarImageQuality.Size = new Size(200, 45);
+        trackBarImageQuality.Size = new Size(260, 45);
         trackBarImageQuality.TabIndex = 3;
         trackBarImageQuality.Value = 75;
         trackBarImageQuality.ValueChanged += trackBarImageQuality_ValueChanged;
@@ -215,7 +239,7 @@ partial class MainForm
         // labelImageQuality
         // 
         labelImageQuality.AutoSize = true;
-        labelImageQuality.Location = new Point(15, 80);
+        labelImageQuality.Location = new Point(15, 72);
         labelImageQuality.Name = "labelImageQuality";
         labelImageQuality.Size = new Size(92, 15);
         labelImageQuality.TabIndex = 2;
@@ -224,7 +248,7 @@ partial class MainForm
         // labelCompressionType
         // 
         labelCompressionType.AutoSize = true;
-        labelCompressionType.Location = new Point(15, 25);
+        labelCompressionType.Location = new Point(15, 20);
         labelCompressionType.Name = "labelCompressionType";
         labelCompressionType.Size = new Size(55, 15);
         labelCompressionType.TabIndex = 0;
@@ -234,11 +258,12 @@ partial class MainForm
         // 
         comboBoxCompressionType.DropDownStyle = ComboBoxStyle.DropDownList;
         comboBoxCompressionType.FormattingEnabled = true;
-        comboBoxCompressionType.Items.AddRange(new object[] { "Tự động (Tốt nhất)", "Lossless tối ưu (mutool + qpdf)", "Hybrid (mutool + Ghostscript + qpdf)", "Screen (Thấp nhất)", "Ebook (Thấp)", "Printer (Cao)", "Prepress (Cao nhất)", "Mặc định" });
-        comboBoxCompressionType.Location = new Point(15, 45);
+        comboBoxCompressionType.Items.AddRange(new object[] { "Tự động (Tốt nhất)", "Scan - Siêu nén (JBIG2 / Đen trắng)", "Scan - Cân bằng (Dấu đỏ & chữ ký)", "Scan - Chất lượng cao (200 DPI)", "Lossless tối ưu (mutool + qpdf)", "Hybrid (mutool + Ghostscript + qpdf)", "Screen (Thấp nhất)", "Ebook (Thấp)", "Printer (Cao)", "Prepress (Cao nhất)", "Mặc định" });
+        comboBoxCompressionType.Location = new Point(15, 40);
         comboBoxCompressionType.Name = "comboBoxCompressionType";
-        comboBoxCompressionType.Size = new Size(200, 23);
+        comboBoxCompressionType.Size = new Size(330, 23);
         comboBoxCompressionType.TabIndex = 1;
+        comboBoxCompressionType.SelectedIndexChanged += comboBoxCompressionType_SelectedIndexChanged;
         // 
         // groupBoxSplitOptions
         // 
@@ -580,6 +605,8 @@ partial class MainForm
     private System.Windows.Forms.TrackBar trackBarImageQuality;
     private System.Windows.Forms.Label labelQualityValue;
     private System.Windows.Forms.CheckBox checkBoxOptimizeForScanned;
+    private System.Windows.Forms.Label labelScanColorMode;
+    private System.Windows.Forms.ComboBox comboBoxScanColorMode;
     private System.Windows.Forms.ProgressBar progressBar;
     private System.Windows.Forms.GroupBox groupBoxSplitOptions;
     private System.Windows.Forms.CheckBox checkBoxEnableSplitting;

@@ -8,18 +8,29 @@ namespace PdfCompressor;
 public partial class MainForm : Form
 {
     private string? selectedPdfPath;
-    private System.Threading.Thread? compressionThread;
-    private bool isCompressionRunning = false;
+    private Task? compressionTask;
+    private CancellationTokenSource? compressionCancellation;
+    private volatile bool isCompressionRunning = false;
+    private volatile bool isClosing = false;
 
     // External PDF optimization tools (optional; user can provide them)
     private const string CompressionTypeLossless = "Lossless tối ưu (mutool + qpdf)";
     private const string CompressionTypeHybrid = "Hybrid (mutool + Ghostscript + qpdf)";
     private const string CompressionTypeAuto = "Tự động (Tốt nhất)";
+    private const string CompressionTypeScanSuper = "Scan - Siêu nén (JBIG2 / Đen trắng)";
+    private const string CompressionTypeScanBalanced = "Scan - Cân bằng (Dấu đỏ & chữ ký)";
+    private const string CompressionTypeScanHighQuality = "Scan - Chất lượng cao (200 DPI)";
+
+    private const string ScanColorAuto = "Tự động (Auto)";
+    private const string ScanColorPreserve = "Giữ màu (Con dấu, chữ ký)";
+    private const string ScanColorGray = "Ảnh xám (Grayscale - Tiết kiệm)";
+    private const string ScanColorMono = "Đen trắng (Monochrome - Siêu nén)";
 
     // Merge functionality fields
     private List<string> mergePdfFiles = new List<string>();
-    private System.Threading.Thread? mergeThread;
-    private bool isMergeRunning = false;
+    private Task? mergeTask;
+    private CancellationTokenSource? mergeCancellation;
+    private volatile bool isMergeRunning = false;
     private static string ProduceVersion()
     {
         // Lấy file .exe (assembly) đang chạy
@@ -40,6 +51,7 @@ public partial class MainForm : Form
     private void InitializeCompressionSettings()
     {
         comboBoxCompressionType.SelectedIndex = 0;
+        comboBoxScanColorMode.SelectedIndex = 0;
         trackBarImageQuality.Value = 75;
         UpdateQualityLabel();
 
@@ -60,6 +72,36 @@ public partial class MainForm : Form
     private void UpdateQualityLabel()
     {
         labelQualityValue.Text = trackBarImageQuality.Value + "%";
+    }
+
+    private void checkBoxOptimizeForScanned_CheckedChanged(object sender, EventArgs e)
+    {
+        bool enabled = checkBoxOptimizeForScanned.Checked;
+        labelScanColorMode.Enabled = enabled;
+        comboBoxScanColorMode.Enabled = enabled;
+    }
+
+    private void comboBoxCompressionType_SelectedIndexChanged(object sender, EventArgs e)
+    {
+        var selected = comboBoxCompressionType.SelectedItem?.ToString();
+        if (selected == CompressionTypeScanSuper)
+        {
+            checkBoxOptimizeForScanned.Checked = true;
+            trackBarImageQuality.Value = 60;
+            comboBoxScanColorMode.SelectedIndex = 3; // Monochrome
+        }
+        else if (selected == CompressionTypeScanBalanced)
+        {
+            checkBoxOptimizeForScanned.Checked = true;
+            trackBarImageQuality.Value = 75;
+            comboBoxScanColorMode.SelectedIndex = 0; // Auto
+        }
+        else if (selected == CompressionTypeScanHighQuality)
+        {
+            checkBoxOptimizeForScanned.Checked = true;
+            trackBarImageQuality.Value = 85;
+            comboBoxScanColorMode.SelectedIndex = 1; // Preserve Color
+        }
     }
 
     private void checkBoxEnableSplitting_CheckedChanged(object sender, EventArgs e)
@@ -91,15 +133,44 @@ public partial class MainForm : Form
         // Log to NLog (file, console, debug)
         Logger.InfoMainForm(message);
 
-        // Also update UI if needed
-        if (logTextBox.InvokeRequired)
+        InvokeOnUi(() => logTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\r\n"));
+    }
+
+    private bool InvokeOnUi(Action action)
+    {
+        if (isClosing || IsDisposed || !IsHandleCreated)
         {
-            logTextBox.Invoke(new Action<string>(LogMessage), message);
-            return;
+            return false;
         }
 
-        // Add to UI
-        logTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\r\n");
+        try
+        {
+            if (InvokeRequired)
+            {
+                Invoke(action);
+            }
+            else
+            {
+                action();
+            }
+            return true;
+        }
+        catch (InvalidOperationException) when (isClosing || IsDisposed || Disposing)
+        {
+            return false;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+    }
+
+    private static bool PathsEqual(string firstPath, string secondPath)
+    {
+        return string.Equals(
+            System.IO.Path.GetFullPath(firstPath),
+            System.IO.Path.GetFullPath(secondPath),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private void selectFileButton_Click(object sender, EventArgs e)
@@ -121,11 +192,16 @@ public partial class MainForm : Form
 
             // Analyze document type
             var documentType = AnalyzeDocumentType(selectedPdfPath ?? "");
-            this.Invoke(new Action(() =>
-            {
-                textBoxDocumentType.Text = documentType;
-            }));
+            textBoxDocumentType.Text = documentType;
             LogMessage($"Loại tài liệu phát hiện: {documentType}");
+
+            if (string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase))
+            {
+                bool hasColor = DetectDocumentHasColor(selectedPdfPath ?? "");
+                LogMessage(hasColor
+                    ? "Kiểm tra màu scan: Có màu (phát hiện con dấu / chữ ký)."
+                    : "Kiểm tra màu scan: Đen trắng / đơn sắc (không có màu).");
+            }
         }
     }
 
@@ -152,38 +228,52 @@ public partial class MainForm : Form
 
         if (saveFileDialog.ShowDialog() == DialogResult.OK)
         {
-            StartCompressionThread(selectedPdfPath ?? "", saveFileDialog.FileName);
+            var inputPath = selectedPdfPath ?? "";
+            if (!string.IsNullOrWhiteSpace(inputPath) && PathsEqual(inputPath, saveFileDialog.FileName))
+            {
+                MessageBox.Show("File kết quả phải khác file PDF gốc.", "Đường dẫn không hợp lệ", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            StartCompressionThread(inputPath, saveFileDialog.FileName);
         }
     }
 
     private void StartCompressionThread(string inputPath, string outputPath)
     {
-        isCompressionRunning = true;
-        compressFileButton.Enabled = false;
-        progressBar.Visible = true;
-        progressBar.Value = 0;
-
         // Read all UI values before starting the thread to avoid cross-thread operations
         var compressionSettings = new CompressionThreadSettings
         {
             CompressionType = comboBoxCompressionType.SelectedItem?.ToString() ?? "Tự động (Tốt nhất)",
+            ScanColorMode = comboBoxScanColorMode.SelectedItem?.ToString() ?? ScanColorAuto,
             ImageQuality = trackBarImageQuality.Value,
             OptimizeForScanned = checkBoxOptimizeForScanned.Checked,
             EnableSplitting = checkBoxEnableSplitting.Checked,
             MaxSplitSizeMB = 5
         };
 
-        if (compressionSettings.EnableSplitting && int.TryParse(textBoxSplitSize.Text, out int splitSize))
+        if (compressionSettings.EnableSplitting)
         {
+            if (!int.TryParse(textBoxSplitSize.Text, out int splitSize) || splitSize <= 0)
+            {
+                MessageBox.Show("Kích thước mỗi phần phải là số nguyên lớn hơn 0 MB.", "Kích thước không hợp lệ", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             compressionSettings.MaxSplitSizeMB = splitSize;
         }
 
         // Get document type from analysis
         compressionSettings.DocumentType = textBoxDocumentType.Text;
 
-        compressionThread = new System.Threading.Thread(() => CompressPdfThreaded(inputPath, outputPath, compressionSettings));
-        compressionThread.IsBackground = true;
-        compressionThread.Start();
+        isCompressionRunning = true;
+        compressFileButton.Enabled = false;
+        progressBar.Visible = true;
+        progressBar.Value = 0;
+
+        compressionCancellation?.Dispose();
+        compressionCancellation = new CancellationTokenSource();
+        var cancellationToken = compressionCancellation.Token;
+        compressionTask = Task.Run(() => CompressPdfWorker(inputPath, outputPath, compressionSettings, cancellationToken));
 
         LogMessage("Bắt đầu quá trình nén...");
         statusLabel.Text = "Đang nén...";
@@ -192,6 +282,7 @@ public partial class MainForm : Form
     private class CompressionThreadSettings
     {
         public string CompressionType { get; set; } = "";
+        public string ScanColorMode { get; set; } = "";
         public int ImageQuality { get; set; } = 75;
         public bool OptimizeForScanned { get; set; } = false;
         public bool EnableSplitting { get; set; } = false;
@@ -199,27 +290,43 @@ public partial class MainForm : Form
         public string DocumentType { get; set; } = "";
     }
 
-    private async void CompressPdfThreaded(string inputPath, string outputPath, CompressionThreadSettings settings)
+    private void CompressPdfWorker(string inputPath, string outputPath, CompressionThreadSettings settings, CancellationToken cancellationToken)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (string.IsNullOrEmpty(inputPath) || !System.IO.File.Exists(inputPath))
             {
                 throw new FileNotFoundException("Input PDF file not found", inputPath);
+            }
+            if (PathsEqual(inputPath, outputPath))
+            {
+                throw new InvalidOperationException("File kết quả phải khác file PDF gốc.");
             }
 
             var ghostscriptPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Ghostscript", "gswin64c.exe");
 
             // Use settings from parameter instead of accessing UI controls
             var compressionType = settings.CompressionType;
+            var scanColorMode = settings.ScanColorMode;
             var imageQuality = settings.ImageQuality;
             var optimizeForScanned = settings.OptimizeForScanned;
             var enableSplitting = settings.EnableSplitting;
             var maxSplitSizeMB = settings.MaxSplitSizeMB;
             var documentType = settings.DocumentType;
 
+            bool isScanPreset = compressionType == CompressionTypeScanSuper ||
+                                compressionType == CompressionTypeScanBalanced ||
+                                compressionType == CompressionTypeScanHighQuality;
+
+            bool isScannedDoc = string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase) || optimizeForScanned || isScanPreset;
+
             LogMessage($"Loại tài liệu: {documentType}");
             LogMessage($"Loại nén: {compressionType}");
+            if (isScannedDoc)
+            {
+                LogMessage($"Chế độ màu scan: {scanColorMode}");
+            }
             LogMessage($"Chất lượng ảnh: {imageQuality}%");
             LogMessage($"Tối ưu cho scan: {optimizeForScanned}");
             if (enableSplitting)
@@ -230,21 +337,50 @@ public partial class MainForm : Form
             UpdateProgress(10);
 
             string bestSetting;
-            CompressionSettings optimalSettings;
+            CompressionSettings optimalSettings = new CompressionSettings();
 
-            // Auto propose: choose Lossless/Hybrid/Ghostscript-only based on document type, layer detection and tool availability
             bool toolsAvailable = AreExternalToolsAvailable(out string mutoolPath, out string qpdfPath);
             bool isLayered = IsPdfLayeredQuick(inputPath);
+
+            bool hasColor = true;
+            if (isScannedDoc)
+            {
+                hasColor = DetectDocumentHasColor(inputPath);
+                LogMessage(hasColor
+                    ? "Kiểm tra màu scan: Có màu sắc (con dấu / chữ ký)."
+                    : "Kiểm tra màu scan: Đen trắng / đơn sắc.");
+            }
+
+            if (isScanPreset)
+            {
+                optimalSettings = GetOptimalSettings(documentType, imageQuality, compressionType, scanColorMode, hasColor);
+                bestSetting = compressionType;
+                LogMessage($"Hồ sơ nén scan: {compressionType} (DPI: {optimalSettings.ColorImageResolution}, Bicubic, JPEG-Q: {optimalSettings.JpegQuality}%, Chuyển xám: {optimalSettings.ConvertToGray})");
+
+                if (toolsAvailable)
+                {
+                    RunScanOptimizedPipeline(mutoolPath, qpdfPath, ghostscriptPath, inputPath, outputPath, optimalSettings, cancellationToken);
+                }
+                else
+                {
+                    RunGhostscriptOnly(ghostscriptPath, inputPath, outputPath, optimalSettings, true);
+                }
+
+                goto AfterCompression;
+            }
+
+            // Auto propose: choose Lossless/Hybrid/Ghostscript-only based on document type, layer detection and tool availability
             if (compressionType == CompressionTypeAuto)
             {
-                // Compute intelligent settings (used for Ghostscript/hybrid)
-                optimalSettings = GetOptimalSettings(documentType, imageQuality);
-
                 string proposed;
                 if (isLayered)
                 {
-                    // Like FileOptimizer: layered PDFs can be broken by Ghostscript; prefer lossless tools if possible.
                     proposed = toolsAvailable ? CompressionTypeLossless : "Ghostscript (không khuyến nghị cho PDF có layer)";
+                }
+                else if (isScannedDoc)
+                {
+                    // For scanned documents in Auto mode: choose Scan Super if monochrome or user chose Mono; otherwise Scan Balanced
+                    proposed = (!hasColor || scanColorMode == ScanColorMono) ? CompressionTypeScanSuper : CompressionTypeScanBalanced;
                 }
                 else if (!toolsAvailable)
                 {
@@ -252,18 +388,10 @@ public partial class MainForm : Form
                 }
                 else if (string.Equals(documentType, "Text Document", StringComparison.OrdinalIgnoreCase))
                 {
-                    // Text PDFs often don't shrink much with GS; keep quality and do structure optimizations.
                     proposed = CompressionTypeLossless;
-                }
-                else if (string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase) ||
-                         optimizeForScanned)
-                {
-                    // Best size reduction for scans.
-                    proposed = CompressionTypeHybrid;
                 }
                 else
                 {
-                    // Mixed/General: Hybrid usually helps, but keep it conservative if quality slider is high.
                     proposed = (imageQuality >= 90) ? CompressionTypeLossless : CompressionTypeHybrid;
                 }
 
@@ -271,27 +399,43 @@ public partial class MainForm : Form
                            (isLayered ? " (phát hiện PDF có layer)" : "") +
                            (!toolsAvailable ? " (thiếu Tools/mutool.exe hoặc Tools/qpdf.exe)" : ""));
 
-                // If we can run the proposed external pipeline, run it; otherwise continue with Ghostscript-only flow below.
+                if (proposed == CompressionTypeScanSuper || proposed == CompressionTypeScanBalanced)
+                {
+                    optimalSettings = GetOptimalSettings(documentType, imageQuality, proposed, scanColorMode, hasColor);
+                    bestSetting = proposed;
+                    if (toolsAvailable)
+                    {
+                        RunScanOptimizedPipeline(mutoolPath, qpdfPath, ghostscriptPath, inputPath, outputPath, optimalSettings, cancellationToken);
+                    }
+                    else
+                    {
+                        RunGhostscriptOnly(ghostscriptPath, inputPath, outputPath, optimalSettings, true);
+                    }
+                    goto AfterCompression;
+                }
+
                 if (proposed == CompressionTypeLossless && toolsAvailable)
                 {
                     RunLosslessPipeline(mutoolPath, qpdfPath, inputPath, outputPath);
                     bestSetting = CompressionTypeLossless;
                     goto AfterCompression;
                 }
+
                 if (proposed == CompressionTypeHybrid && toolsAvailable)
                 {
+                    optimalSettings = GetOptimalSettings(documentType, imageQuality, proposed, scanColorMode, hasColor);
                     RunHybridPipeline(mutoolPath, qpdfPath, ghostscriptPath, inputPath, outputPath, optimalSettings, optimizeForScanned);
                     bestSetting = CompressionTypeHybrid;
                     goto AfterCompression;
                 }
 
                 // fallthrough -> Ghostscript-only flow (keeps existing behavior)
+                optimalSettings = GetOptimalSettings(documentType, imageQuality, proposed, scanColorMode, hasColor);
                 bestSetting = optimalSettings.PdfSetting;
             }
             else if (compressionType == CompressionTypeLossless || compressionType == CompressionTypeHybrid)
             {
-                // Still compute intelligent settings (Hybrid needs it; Lossless just shows info)
-                optimalSettings = GetOptimalSettings(documentType, imageQuality);
+                optimalSettings = GetOptimalSettings(documentType, imageQuality, compressionType, scanColorMode, hasColor);
                 bestSetting = compressionType;
 
                 if (!toolsAvailable)
@@ -315,18 +459,6 @@ public partial class MainForm : Form
 
                 goto AfterCompression;
             }
-            else if (compressionType == CompressionTypeAuto)
-            {
-                // Use intelligent settings based on document analysis
-                optimalSettings = GetOptimalSettings(documentType, imageQuality);
-                bestSetting = optimalSettings.PdfSetting;
-
-                LogMessage($"Chế độ tự động phát hiện {documentType}");
-                LogMessage($"Sử dụng thiết lập nén thông minh: {bestSetting}");
-                LogMessage($"Độ phân giải màu: {optimalSettings.ColorImageResolution} DPI");
-                LogMessage($"Độ phân giải xám: {optimalSettings.GrayImageResolution} DPI");
-                LogMessage($"Chất lượng JPEG: {optimalSettings.JpegQuality}%");
-            }
             else
             {
                 bestSetting = GetPdfSettingFromType(compressionType);
@@ -335,122 +467,88 @@ public partial class MainForm : Form
                     PdfSetting = bestSetting,
                     JpegQuality = imageQuality,
                     ColorImageResolution = 300,
-                    GrayImageResolution = 300
+                    GrayImageResolution = 300,
+                    MonoImageResolution = 300,
+                    DownsampleType = "/Bicubic",
+                    DownsampleThreshold = 1.0
                 };
                 LogMessage($"Sử dụng thiết lập nén: {bestSetting}");
             }
 
-            // If we already produced output via Lossless/Hybrid branch above, skip Ghostscript-only section.
-            if (compressionType != CompressionTypeLossless && compressionType != CompressionTypeHybrid)
-            {
-                UpdateProgress(50);
-
-                // Use GhostscriptAPI wrapper for compression
-                LogMessage("Sử dụng Ghostscript API để nén file...");
-                UpdateProgress(60);
-
-                try
-                {
-                    if (!GhostscriptAPI.IsGhostscriptAvailable())
-                    {
-                        LogMessage("Ghostscript API không sẵn có, sử dụng phương pháp thay thế...");
-                        throw new GhostscriptException("Ghostscript DLL not available", -1);
-                    }
-
-                    using (var gsApi = new GhostscriptAPI())
-                    {
-                        // Create compression settings based on optimal settings
-                        var compressionSettings = new PdfCompressionSettings
-                        {
-                            PdfSetting = optimalSettings.PdfSetting,
-                            ColorImageResolution = optimalSettings.ColorImageResolution,
-                            GrayImageResolution = optimalSettings.GrayImageResolution,
-                            JpegQuality = optimalSettings.JpegQuality,
-                            UseAutoFilter = optimalSettings.UseAutoFilter,
-                            UseDCTEncode = optimalSettings.UseDCTEncode,
-                            DownsampleColorImages = optimalSettings.DownsampleColorImages,
-                            DownsampleGrayImages = optimalSettings.DownsampleGrayImages
-                        };
-
-                        gsApi.CompressPdf(inputPath, outputPath, compressionSettings);
-                        UpdateProgress(90);
-
-                        LogMessage("Nén file thành công với Ghostscript API!");
-                    }
-                }
-                catch (GhostscriptException gsEx)
-                {
-                    string errorMsg = GhostscriptAPI.GetErrorMessage(gsEx.ErrorCode);
-                    LogMessage($"Lỗi Ghostscript API: {errorMsg}");
-                    LogMessage($"Chi tiết: {gsEx.Message}");
-
-                    // Fallback to process-based approach
-                    LogMessage("Thử phương pháp thay thế (process-based)...");
-
-                    // Build Ghostscript arguments with optimal compression settings
-                    var arguments = BuildIntelligentGhostscriptArguments(inputPath, outputPath, optimalSettings, optimizeForScanned);
-
-                    LogMessage("Bắt đầu nén với Ghostscript process...");
-                    UpdateProgress(70);
-
-                    RunProcessOrThrow(ghostscriptPath, arguments, "Ghostscript (process)");
-
-                    UpdateProgress(90);
-
-                    LogMessage("Nén file thành công với phương pháp thay thế!");
-                }
-            }
+            // Ghostscript-only flow
+            RunGhostscriptOnly(ghostscriptPath, inputPath, outputPath, optimalSettings, optimizeForScanned);
 
         AfterCompression:
 
+            cancellationToken.ThrowIfCancellationRequested();
+
             var originalSize = GetFileSize(inputPath);
             var compressedSize = GetFileSize(outputPath);
+            if (originalSize <= 0)
+            {
+                throw new InvalidDataException("File PDF gốc rỗng hoặc không thể đọc kích thước.");
+            }
+            if (compressedSize <= 0)
+            {
+                throw new InvalidOperationException("Công cụ nén không tạo được file kết quả hợp lệ.");
+            }
 
             // Guard: sometimes scanned PDFs become larger after re-encoding.
             // If that happens, retry once with a more aggressive scanned profile, and if still not smaller,
             // warn the user and offer to delete the "compressed" output.
             if (compressedSize >= originalSize)
             {
-                bool isScanned = string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase);
+                bool isScanned = string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase) || optimizeForScanned || isScanPreset;
                 if (isScanned)
                 {
+                    string? retryTempPath = null;
                     try
                     {
-                        var retryTempPath = System.IO.Path.Combine(
+                        retryTempPath = System.IO.Path.Combine(
                             System.IO.Path.GetDirectoryName(outputPath) ?? "",
-                            $"{System.IO.Path.GetFileNameWithoutExtension(outputPath)}.retry.pdf");
+                            $"{System.IO.Path.GetFileNameWithoutExtension(outputPath)}.retry.{Guid.NewGuid():N}.pdf");
 
                         var aggressive = new CompressionSettings
                         {
                             PdfSetting = "/screen",
                             ColorImageResolution = 120,
                             GrayImageResolution = 120,
-                            JpegQuality = Math.Min(60, optimalSettings.JpegQuality),
+                            MonoImageResolution = 300,
+                            JpegQuality = Math.Min(55, optimalSettings.JpegQuality),
                             UseAutoFilter = false,
                             UseDCTEncode = true,
                             DownsampleColorImages = true,
-                            DownsampleGrayImages = true
+                            DownsampleGrayImages = true,
+                            DownsampleMonoImages = true,
+                            DownsampleType = "/Bicubic",
+                            DownsampleThreshold = 1.0,
+                            PassThroughJPEGImages = false,
+                            ConvertToGray = true,
+                            UseJbig2 = true
                         };
 
                         LogMessage($"Cảnh báo: file sau nén đang lớn hơn hoặc bằng file gốc ({FormatFileSize(compressedSize)} >= {FormatFileSize(originalSize)}). Thử lại cấu hình scan mạnh hơn...");
 
-                        var retryArgs = BuildIntelligentGhostscriptArguments(inputPath, retryTempPath, aggressive, true);
-                        var retryProcess = new System.Diagnostics.Process();
-                        retryProcess.StartInfo.FileName = ghostscriptPath;
-                        retryProcess.StartInfo.Arguments = retryArgs;
-                        retryProcess.StartInfo.CreateNoWindow = true;
-                        retryProcess.StartInfo.UseShellExecute = false;
-                        retryProcess.Start();
-                        retryProcess.WaitForExit();
+                        if (toolsAvailable)
+                        {
+                            RunScanOptimizedPipeline(mutoolPath, qpdfPath, ghostscriptPath, inputPath, retryTempPath, aggressive, cancellationToken);
+                        }
+                        else
+                        {
+                            var retryArgs = BuildIntelligentGhostscriptArguments(inputPath, retryTempPath, aggressive, true);
+                            RunProcessOrThrow(ghostscriptPath, retryArgs, "Ghostscript retry");
+                        }
 
                         var retrySize = GetFileSize(retryTempPath);
                         if (retrySize > 0 && retrySize < compressedSize && retrySize < originalSize)
                         {
                             try
                             {
-                                // Replace output with better retry result
-                                System.IO.File.Delete(outputPath);
-                                System.IO.File.Move(retryTempPath, outputPath);
+                                // Atomically replace the output. If replacement fails, the
+                                // existing compressed file remains intact.
+                                var backupPath = outputPath + $".backup.{Guid.NewGuid():N}";
+                                System.IO.File.Replace(retryTempPath, outputPath, backupPath, true);
+                                try { System.IO.File.Delete(backupPath); } catch { }
                                 compressedSize = retrySize;
                                 LogMessage($"Thử lại thành công: kích thước sau nén giảm còn {FormatFileSize(compressedSize)}");
                             }
@@ -465,9 +563,24 @@ public partial class MainForm : Form
                             try { System.IO.File.Delete(retryTempPath); } catch { }
                         }
                     }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
                     catch (Exception ex)
                     {
                         LogMessage($"Retry scan compression failed: {ex.Message}");
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(retryTempPath) && System.IO.File.Exists(retryTempPath))
+                            {
+                                System.IO.File.Delete(retryTempPath);
+                            }
+                        }
+                        catch { }
                     }
                 }
 
@@ -476,22 +589,26 @@ public partial class MainForm : Form
                     LogMessage($"Cảnh báo: file sau nén không nhỏ hơn file gốc ({FormatFileSize(compressedSize)} >= {FormatFileSize(originalSize)}).");
 
                     DialogResult keepResult = DialogResult.Yes;
-                    this.Invoke(new Action(() =>
+                    if (!InvokeOnUi(() =>
                     {
                         keepResult = MessageBox.Show(
                             $"Kết quả nén không hiệu quả (file sau nén không nhỏ hơn file gốc).\n\nGốc: {FormatFileSize(originalSize)}\nSau nén: {FormatFileSize(compressedSize)}\n\nBạn có muốn GIỮ file nén không?\n- Yes: Giữ file nén\n- No: Xóa file nén (giữ file gốc)",
                             "Nén không giảm dung lượng",
                             MessageBoxButtons.YesNo,
                             MessageBoxIcon.Warning);
-                    }));
+                    }))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                    }
 
                     if (keepResult == DialogResult.No)
                     {
                         try
                         {
                             System.IO.File.Delete(outputPath);
-                            compressedSize = originalSize;
                             LogMessage("Đã xóa file nén vì dung lượng không giảm.");
+                            InvokeOnUi(() => statusLabel.Text = "Đã hủy kết quả nén không hiệu quả.");
+                            return;
                         }
                         catch (Exception ex)
                         {
@@ -520,19 +637,22 @@ public partial class MainForm : Form
                 LogMessage($"File sau nén vẫn lớn ({FormatFileSize(compressedSize)}). Gợi ý chia file thành các phần ~{splitPartSizeMB}MB.");
 
                 DialogResult splitResult = DialogResult.No;
-                this.Invoke(new Action(() =>
+                if (!InvokeOnUi(() =>
                 {
                     splitResult = MessageBox.Show(
                         $"File sau nén vẫn còn lớn.\n\nKích thước: {FormatFileSize(compressedSize)}\nNgưỡng gợi ý: {suggestThresholdMB}MB\n\nBạn có muốn chia file thành các phần khoảng {splitPartSizeMB}MB không?",
                         "Gợi ý chia file",
                         MessageBoxButtons.YesNo,
                         MessageBoxIcon.Question);
-                }));
+                }))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
 
                 if (splitResult == DialogResult.Yes)
                 {
                     LogMessage($"Người dùng chọn chia file. Đang chia nhỏ (tối đa ~{splitPartSizeMB}MB/phần)...");
-                    await SplitPdfFile(outputPath, splitPartSizeMB * MB);
+                    SplitPdfFile(outputPath, splitPartSizeMB * MB, cancellationToken);
                     didSplit = true;
                 }
             }
@@ -548,7 +668,7 @@ public partial class MainForm : Form
             UpdateProgress(100);
 
             // Update UI on main thread
-            this.Invoke(new Action(() =>
+            InvokeOnUi(() =>
             {
                 statusLabel.Text = "Nén hoàn tất!";
 
@@ -569,25 +689,29 @@ public partial class MainForm : Form
                 {
                     OpenOutputFolder(outputPath);
                 }
-            }));
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            LogMessage("Đã hủy quá trình nén.");
         }
         catch (Exception ex)
         {
             LogMessage($"Error during compression: {ex.Message}");
-            this.Invoke(new Action(() =>
+            InvokeOnUi(() =>
             {
                 statusLabel.Text = "Compression failed!";
                 MessageBox.Show($"Compression failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }));
+            });
         }
         finally
         {
-            this.Invoke(new Action(() =>
+            isCompressionRunning = false;
+            InvokeOnUi(() =>
             {
-                isCompressionRunning = false;
                 compressFileButton.Enabled = true;
                 progressBar.Visible = false;
-            }));
+            });
         }
     }
 
@@ -647,6 +771,15 @@ public partial class MainForm : Form
         process.Start();
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
+        while (!process.WaitForExit(250))
+        {
+            if (isClosing)
+            {
+                try { process.Kill(true); } catch { }
+                throw new OperationCanceledException($"Đã hủy {label} vì ứng dụng đang đóng.");
+            }
+        }
+        // Ensure asynchronous stdout/stderr handlers have drained.
         process.WaitForExit();
 
         string stdout = stdoutBuffer.ToString();
@@ -765,6 +898,217 @@ public partial class MainForm : Form
         }
     }
 
+    private void RunScanOptimizedPipeline(
+        string mutoolPath,
+        string qpdfPath,
+        string ghostscriptPath,
+        string inputPath,
+        string outputPath,
+        CompressionSettings optimalSettings,
+        CancellationToken cancellationToken)
+    {
+        string tmpGsOut = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid():N}.gs.pdf");
+        string tmpMutoolOut = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid():N}.mutool.pdf");
+
+        try
+        {
+            string colorDesc = optimalSettings.ConvertToGray ? "Ảnh xám/Đen trắng" : "Giữ màu sRGB";
+            LogMessage($"Bước 1: Ghostscript tái cấu trúc scan (DPI: {optimalSettings.ColorImageResolution}, Bicubic, JPEG-Q: {optimalSettings.JpegQuality}%, {colorDesc})...");
+            UpdateProgress(35);
+
+            // Execute Ghostscript (API or process fallback)
+            try
+            {
+                if (!GhostscriptAPI.IsGhostscriptAvailable())
+                {
+                    throw new GhostscriptException("Ghostscript DLL not available", -1);
+                }
+
+                using var gsApi = new GhostscriptAPI();
+                var compressionSettings = new PdfCompressionSettings
+                {
+                    PdfSetting = optimalSettings.PdfSetting,
+                    ColorImageResolution = optimalSettings.ColorImageResolution,
+                    GrayImageResolution = optimalSettings.GrayImageResolution,
+                    MonoImageResolution = optimalSettings.MonoImageResolution,
+                    JpegQuality = optimalSettings.JpegQuality,
+                    UseAutoFilter = optimalSettings.UseAutoFilter,
+                    UseDCTEncode = optimalSettings.UseDCTEncode,
+                    DownsampleColorImages = optimalSettings.DownsampleColorImages,
+                    DownsampleGrayImages = optimalSettings.DownsampleGrayImages,
+                    DownsampleMonoImages = optimalSettings.DownsampleMonoImages,
+                    DownsampleType = optimalSettings.DownsampleType,
+                    DownsampleThreshold = optimalSettings.DownsampleThreshold,
+                    PassThroughJPEGImages = optimalSettings.PassThroughJPEGImages,
+                    ConvertToGray = optimalSettings.ConvertToGray
+                };
+
+                gsApi.CompressPdf(inputPath, tmpGsOut, compressionSettings);
+            }
+            catch (GhostscriptException gsEx)
+            {
+                string errorMsg = GhostscriptAPI.GetErrorMessage(gsEx.ErrorCode);
+                LogMessage($"Ghostscript API: {errorMsg} -> Chuyển sang Ghostscript process...");
+                var arguments = BuildIntelligentGhostscriptArguments(inputPath, tmpGsOut, optimalSettings, true);
+                RunProcessOrThrow(ghostscriptPath, arguments, "Ghostscript (process)");
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            string currentIntermediate = tmpGsOut;
+
+            // Step 2: MuTool clean with JBIG2 recompression and stream deduplication
+            if (System.IO.File.Exists(mutoolPath))
+            {
+                LogMessage("Bước 2: mutool khử trùng lặp đối tượng & nén JBIG2 cho trang đen trắng...");
+                UpdateProgress(65);
+
+                var mutoolArgs = optimalSettings.UseJbig2
+                    ? $"clean -gggg -z -i -Z --bitonal-image-recompress-method=jbig2 \"{currentIntermediate}\" \"{tmpMutoolOut}\""
+                    : $"clean -gggg -z -i -Z \"{currentIntermediate}\" \"{tmpMutoolOut}\"";
+
+                try
+                {
+                    RunProcessOrThrow(mutoolPath, mutoolArgs, "mutool clean + jbig2");
+                    if (System.IO.File.Exists(tmpMutoolOut) && GetFileSize(tmpMutoolOut) > 0)
+                    {
+                        currentIntermediate = tmpMutoolOut;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogMessage($"Bỏ qua bước mutool (lỗi: {ex.Message}), tiếp tục với kết quả Ghostscript.");
+                }
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Step 3: QPDF optimization and object streams
+            if (System.IO.File.Exists(qpdfPath))
+            {
+                LogMessage("Bước 3: qpdf tối ưu hóa luồng đối tượng (Object Streams)...");
+                UpdateProgress(85);
+                RunQpdfOptimize(qpdfPath, currentIntermediate, outputPath);
+            }
+            else
+            {
+                System.IO.File.Copy(currentIntermediate, outputPath, true);
+            }
+
+            UpdateProgress(95);
+            LogMessage("Hoàn tất quy trình nén tối ưu cho PDF Scan.");
+        }
+        finally
+        {
+            try { if (System.IO.File.Exists(tmpGsOut)) System.IO.File.Delete(tmpGsOut); } catch { }
+            try { if (System.IO.File.Exists(tmpMutoolOut)) System.IO.File.Delete(tmpMutoolOut); } catch { }
+        }
+    }
+
+    private void RunGhostscriptOnly(
+        string ghostscriptPath,
+        string inputPath,
+        string outputPath,
+        CompressionSettings optimalSettings,
+        bool optimizeForScanned)
+    {
+        UpdateProgress(50);
+        LogMessage("Sử dụng Ghostscript API để nén file...");
+        UpdateProgress(60);
+
+        try
+        {
+            if (!GhostscriptAPI.IsGhostscriptAvailable())
+            {
+                throw new GhostscriptException("Ghostscript DLL not available", -1);
+            }
+
+            using var gsApi = new GhostscriptAPI();
+            var compressionSettings = new PdfCompressionSettings
+            {
+                PdfSetting = optimalSettings.PdfSetting,
+                ColorImageResolution = optimalSettings.ColorImageResolution,
+                GrayImageResolution = optimalSettings.GrayImageResolution,
+                MonoImageResolution = optimalSettings.MonoImageResolution,
+                JpegQuality = optimalSettings.JpegQuality,
+                UseAutoFilter = optimalSettings.UseAutoFilter,
+                UseDCTEncode = optimalSettings.UseDCTEncode,
+                DownsampleColorImages = optimalSettings.DownsampleColorImages,
+                DownsampleGrayImages = optimalSettings.DownsampleGrayImages,
+                DownsampleMonoImages = optimalSettings.DownsampleMonoImages,
+                DownsampleType = optimalSettings.DownsampleType,
+                DownsampleThreshold = optimalSettings.DownsampleThreshold,
+                PassThroughJPEGImages = optimalSettings.PassThroughJPEGImages,
+                ConvertToGray = optimalSettings.ConvertToGray
+            };
+
+            gsApi.CompressPdf(inputPath, outputPath, compressionSettings);
+            UpdateProgress(90);
+            LogMessage("Nén file thành công với Ghostscript API!");
+        }
+        catch (GhostscriptException gsEx)
+        {
+            string errorMsg = GhostscriptAPI.GetErrorMessage(gsEx.ErrorCode);
+            LogMessage($"Lỗi Ghostscript API: {errorMsg}. Chuyển sang Ghostscript process...");
+            var arguments = BuildIntelligentGhostscriptArguments(inputPath, outputPath, optimalSettings, optimizeForScanned);
+            RunProcessOrThrow(ghostscriptPath, arguments, "Ghostscript (process)");
+            UpdateProgress(90);
+            LogMessage("Nén file thành công với phương pháp thay thế!");
+        }
+    }
+
+    private bool DetectDocumentHasColor(string filePath)
+    {
+        try
+        {
+            var mutoolPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Tools", "mutool.exe");
+            if (System.IO.File.Exists(mutoolPath))
+            {
+                using var process = new System.Diagnostics.Process();
+                process.StartInfo.FileName = mutoolPath;
+                process.StartInfo.Arguments = $"info -I \"{filePath}\"";
+                process.StartInfo.CreateNoWindow = true;
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+                process.Start();
+
+                var outputTask = process.StandardOutput.ReadToEndAsync();
+                if (process.WaitForExit(3000))
+                {
+                    string info = outputTask.GetAwaiter().GetResult();
+                    if (!string.IsNullOrEmpty(info))
+                    {
+                        if (info.Contains("DeviceRGB", StringComparison.OrdinalIgnoreCase) ||
+                            info.Contains("DeviceCMYK", StringComparison.OrdinalIgnoreCase) ||
+                            info.Contains("ICCBased", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return true;
+                        }
+                        if (info.Contains("DeviceGray", StringComparison.OrdinalIgnoreCase) ||
+                            info.Contains("1bpc", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return false;
+                        }
+                    }
+                }
+                else
+                {
+                    try { process.Kill(true); } catch { }
+                }
+            }
+
+            // Fallback: check sample of file
+            var sample = ReadPdfSample(filePath);
+            return sample.Contains("/DeviceRGB", StringComparison.Ordinal) ||
+                   sample.Contains("/DeviceCMYK", StringComparison.Ordinal);
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
     private bool IsPdfLayeredQuick(string filePath)
     {
         // Detect common layer/OCG markers: /OCProperties /OCG /OCGs
@@ -799,15 +1143,9 @@ public partial class MainForm : Form
 
     private void UpdateProgress(int value)
     {
-        if (progressBar.InvokeRequired)
-        {
-            progressBar.Invoke(new Action<int>(UpdateProgress), value);
-            return;
-        }
-        progressBar.Value = value;
+        InvokeOnUi(() => progressBar.Value = Math.Clamp(value, progressBar.Minimum, progressBar.Maximum));
     }
 
-    
     private string GetPdfSettingFromType(string type)
     {
         return type switch
@@ -895,8 +1233,9 @@ public partial class MainForm : Form
             if (string.IsNullOrEmpty(filePath) || !System.IO.File.Exists(filePath))
                 return "Unknown";
 
-            // Read PDF file to analyze content
-            var pdfContent = System.IO.File.ReadAllText(filePath, System.Text.Encoding.ASCII);
+            // PDF streams are binary and can be very large. Sample the beginning and
+            // end instead of loading the entire file on the UI thread.
+            var pdfContent = ReadPdfSample(filePath);
 
             // Check for indicators of scanned documents
             if (IsScannedDocument(pdfContent, filePath))
@@ -923,6 +1262,25 @@ public partial class MainForm : Form
             LogMessage($"Error analyzing document: {ex.Message}");
             return "Analysis Failed";
         }
+    }
+
+    private static string ReadPdfSample(string filePath)
+    {
+        const int sampleBytes = 2 * 1024 * 1024;
+        using var stream = new System.IO.FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        int firstLength = (int)Math.Min(stream.Length, sampleBytes);
+        var first = new byte[firstLength];
+        stream.ReadExactly(first);
+
+        if (stream.Length <= sampleBytes * 2L)
+        {
+            return System.Text.Encoding.Latin1.GetString(first);
+        }
+
+        stream.Seek(-sampleBytes, SeekOrigin.End);
+        var last = new byte[sampleBytes];
+        stream.ReadExactly(last);
+        return System.Text.Encoding.Latin1.GetString(first) + System.Text.Encoding.Latin1.GetString(last);
     }
 
     private bool IsScannedDocument(string pdfContent, string filePath)
@@ -986,53 +1344,106 @@ public partial class MainForm : Form
         return count;
     }
 
-    private CompressionSettings GetOptimalSettings(string documentType, int imageQuality)
+    private CompressionSettings GetOptimalSettings(
+        string documentType,
+        int imageQuality,
+        string compressionType = "",
+        string scanColorMode = "",
+        bool hasColorImages = true)
     {
-        return documentType switch
+        bool isScanSuper = compressionType == CompressionTypeScanSuper;
+        bool isScanBalanced = compressionType == CompressionTypeScanBalanced;
+        bool isScanHigh = compressionType == CompressionTypeScanHighQuality;
+        bool isScanned = isScanSuper || isScanBalanced || isScanHigh || string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase);
+
+        if (isScanned)
         {
-            "Scanned Document" => new CompressionSettings
+            bool convertToGray = false;
+            if (scanColorMode == ScanColorMono || isScanSuper)
             {
-                PdfSetting = "/screen",
-                ColorImageResolution = Math.Max(150, imageQuality * 2),
-                GrayImageResolution = Math.Max(150, imageQuality * 2),
-                JpegQuality = imageQuality,
+                convertToGray = true;
+            }
+            else if (scanColorMode == ScanColorGray)
+            {
+                convertToGray = true;
+            }
+            else if (scanColorMode == ScanColorAuto && !hasColorImages)
+            {
+                convertToGray = true;
+            }
+
+            int res = isScanHigh ? 180 : (isScanSuper ? 130 : 150);
+            int q = isScanHigh ? Math.Min(80, Math.Max(72, imageQuality)) : (isScanSuper ? Math.Min(60, imageQuality) : Math.Min(75, imageQuality));
+
+            return new CompressionSettings
+            {
+                PdfSetting = isScanHigh ? "/printer" : "/screen",
+                ColorImageResolution = res,
+                GrayImageResolution = res,
+                MonoImageResolution = 300,
+                JpegQuality = q,
                 UseAutoFilter = false,
                 UseDCTEncode = true,
                 DownsampleColorImages = true,
-                DownsampleGrayImages = true
-            },
+                DownsampleGrayImages = true,
+                DownsampleMonoImages = true,
+                DownsampleType = "/Bicubic",
+                DownsampleThreshold = 1.0,
+                PassThroughJPEGImages = false,
+                ConvertToGray = convertToGray,
+                UseJbig2 = true
+            };
+        }
+
+        return documentType switch
+        {
             "Text Document" => new CompressionSettings
             {
                 PdfSetting = "/ebook",
                 ColorImageResolution = 300,
                 GrayImageResolution = 300,
+                MonoImageResolution = 300,
                 JpegQuality = Math.Max(80, imageQuality),
                 UseAutoFilter = true,
                 UseDCTEncode = false,
                 DownsampleColorImages = false,
-                DownsampleGrayImages = false
+                DownsampleGrayImages = false,
+                DownsampleMonoImages = false,
+                DownsampleType = "/Bicubic",
+                DownsampleThreshold = 1.0,
+                PassThroughJPEGImages = true
             },
             "Mixed Content" => new CompressionSettings
             {
                 PdfSetting = "/printer",
                 ColorImageResolution = 200,
                 GrayImageResolution = 200,
+                MonoImageResolution = 300,
                 JpegQuality = imageQuality,
                 UseAutoFilter = true,
                 UseDCTEncode = true,
                 DownsampleColorImages = true,
-                DownsampleGrayImages = true
+                DownsampleGrayImages = true,
+                DownsampleMonoImages = true,
+                DownsampleType = "/Bicubic",
+                DownsampleThreshold = 1.0,
+                PassThroughJPEGImages = false
             },
             _ => new CompressionSettings
             {
                 PdfSetting = "/default",
                 ColorImageResolution = 300,
                 GrayImageResolution = 300,
+                MonoImageResolution = 300,
                 JpegQuality = 75,
                 UseAutoFilter = true,
                 UseDCTEncode = false,
                 DownsampleColorImages = false,
-                DownsampleGrayImages = false
+                DownsampleGrayImages = false,
+                DownsampleMonoImages = false,
+                DownsampleType = "/Bicubic",
+                DownsampleThreshold = 1.0,
+                PassThroughJPEGImages = true
             }
         };
     }
@@ -1042,11 +1453,19 @@ public partial class MainForm : Form
         public string PdfSetting { get; set; } = "/default";
         public int ColorImageResolution { get; set; } = 300;
         public int GrayImageResolution { get; set; } = 300;
+        public int MonoImageResolution { get; set; } = 300;
         public int JpegQuality { get; set; } = 75;
         public bool UseAutoFilter { get; set; } = true;
         public bool UseDCTEncode { get; set; } = false;
         public bool DownsampleColorImages { get; set; } = false;
         public bool DownsampleGrayImages { get; set; } = false;
+        public bool DownsampleMonoImages { get; set; } = false;
+        public string DownsampleType { get; set; } = "/Bicubic";
+        public double DownsampleThreshold { get; set; } = 1.0;
+        public bool PassThroughJPEGImages { get; set; } = false;
+        public string ColorConversionStrategy { get; set; } = "/sRGB";
+        public bool ConvertToGray { get; set; } = false;
+        public bool UseJbig2 { get; set; } = false;
     }
 
 
@@ -1060,50 +1479,63 @@ public partial class MainForm : Form
     private string BuildIntelligentGhostscriptArguments(string inputPath, string outputPath, CompressionSettings settings, bool optimizeForScanned)
     {
         var arguments =
-            $"-sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS={settings.PdfSetting} " +
+            $"-sDEVICE=pdfwrite -dCompatibilityLevel=1.5 -dPDFSETTINGS={settings.PdfSetting} " +
             "-dNOPAUSE -dQUIET -dBATCH " +
-            // Extra optimization flags (inspired by FileOptimizer pipeline)
             "-dSAFER -dDELAYSAFER -dNOPROMPT " +
-            "-dDetectDuplicateImages=true -dAutoRotatePages=/None -dOptimize=true " +
-            "-dConvertCMYKImagesToRGB=true -dColorConversionStrategy=/sRGB -dPrinted=false";
+            "-dDetectDuplicateImages=true -dAutoRotatePages=/None -dOptimize=true -dPrinted=false";
 
-        // Add intelligent compression settings based on document analysis
+        if (settings.ConvertToGray)
+        {
+            arguments += " -dColorConversionStrategy=/Gray -dProcessColorModel=/DeviceGray";
+        }
+        else
+        {
+            arguments += $" -dConvertCMYKImagesToRGB=true -dColorConversionStrategy={settings.ColorConversionStrategy}";
+        }
+
+        if (!settings.PassThroughJPEGImages)
+        {
+            arguments += " -dPassThroughJPEGImages=false";
+        }
+
         if (optimizeForScanned || settings.DownsampleColorImages)
         {
-            // IMPORTANT: Ghostscript only downsamples if the corresponding Downsample flag is enabled.
-            arguments += " -dDownsampleColorImages=true -dColorImageDownsampleType=/Average";
+            arguments += $" -dDownsampleColorImages=true -dColorImageDownsampleType={settings.DownsampleType}";
             arguments += $" -dColorImageResolution={settings.ColorImageResolution}";
+            arguments += $" -dColorImageDownsampleThreshold={settings.DownsampleThreshold:F1}";
         }
 
         if (optimizeForScanned || settings.DownsampleGrayImages)
         {
-            arguments += " -dDownsampleGrayImages=true -dGrayImageDownsampleType=/Average";
+            arguments += $" -dDownsampleGrayImages=true -dGrayImageDownsampleType={settings.DownsampleType}";
             arguments += $" -dGrayImageResolution={settings.GrayImageResolution}";
+            arguments += $" -dGrayImageDownsampleThreshold={settings.DownsampleThreshold:F1}";
         }
 
-        // Scanned PDFs often contain 1-bit (mono) images; ensure we don't accidentally bloat them.
-        // (Keep mono at a sane default; user doesn't control this in UI yet.)
-        if (optimizeForScanned)
+        if (optimizeForScanned || settings.DownsampleMonoImages)
         {
-            arguments += " -dDownsampleMonoImages=true -dMonoImageDownsampleType=/Subsample -dMonoImageResolution=300";
-            // Keep lossless-ish mono compression (commonly supported).
+            arguments += " -dDownsampleMonoImages=true -dMonoImageDownsampleType=/Subsample";
+            arguments += $" -dMonoImageResolution={settings.MonoImageResolution}";
+            arguments += $" -dMonoImageDownsampleThreshold={settings.DownsampleThreshold:F1}";
             arguments += " -dMonoImageFilter=/CCITTFaxEncode";
         }
 
-        // Configure image filters
         if (settings.UseDCTEncode)
         {
             arguments += " -dAutoFilterColorImages=false -dColorImageFilter=/DCTEncode";
             arguments += " -dAutoFilterGrayImages=false -dGrayImageFilter=/DCTEncode";
         }
 
-        // Set JPEG quality
+        arguments += " -dEncodeColorImages=true -dEncodeGrayImages=true -dEncodeMonoImages=true";
         arguments += $" -dJPEGQ={settings.JpegQuality}";
 
-        // Additional optimization parameters
         if (settings.PdfSetting == "/screen")
         {
             arguments += " -dSubsetFonts=true -dEmbedAllFonts=false";
+        }
+        else
+        {
+            arguments += " -dSubsetFonts=true -dEmbedAllFonts=true";
         }
 
         arguments += $" -sOutputFile=\"{outputPath}\" \"{inputPath}\"";
@@ -1111,95 +1543,170 @@ public partial class MainForm : Form
         return arguments;
     }
 
-    private async Task SplitPdfFile(string inputPath, long maxSplitSize)
+    private void SplitPdfFile(string inputPath, long maxSplitSize, CancellationToken cancellationToken)
     {
+        if (maxSplitSize <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxSplitSize), "Kích thước phần phải lớn hơn 0.");
+        }
+
+        var directory = System.IO.Path.GetDirectoryName(inputPath) ?? "";
+        var filenameWithoutExt = System.IO.Path.GetFileNameWithoutExtension(inputPath);
+        var outputStem = filenameWithoutExt;
+        if (System.IO.File.Exists(System.IO.Path.Combine(directory, $"{outputStem}.part1.pdf")))
+        {
+            outputStem = $"{filenameWithoutExt}.split.{DateTime.Now:yyyyMMddHHmmss}";
+        }
+        var inputSize = GetFileSize(inputPath);
+        if (inputSize <= 0)
+        {
+            throw new InvalidDataException("File cần chia rỗng hoặc không tồn tại.");
+        }
+
+        int pageCount = GetPdfPageCount(inputPath);
+        int pagesPerPart = Math.Max(1, (int)Math.Floor((double)pageCount * maxSplitSize / inputSize));
+        int startPage = 1;
+        int partNumber = 1;
+        var createdParts = new List<string>();
+
+        LogMessage($"Đang chia {pageCount} trang thành các phần tối đa khoảng {FormatFileSize(maxSplitSize)}...");
+
         try
         {
-            // For simplicity, we'll create multiple output files by splitting pages
-            // In a real implementation, you might want to use a PDF library like iTextSharp
-
-            var directory = System.IO.Path.GetDirectoryName(inputPath) ?? "";
-            var filenameWithoutExt = System.IO.Path.GetFileNameWithoutExtension(inputPath) ?? "";
-            var inputSize = GetFileSize(inputPath);
-
-            LogMessage($"Splitting {FormatFileSize(inputSize)} file into chunks of {FormatFileSize(maxSplitSize)}...");
-
-            // For demonstration, we'll create 3-4 split files
-            // In reality, you'd need to analyze page count and split accordingly
-            int numSplits = (int)Math.Ceiling((double)inputSize / maxSplitSize);
-
-            for (int i = 0; i < numSplits; i++)
+            while (startPage <= pageCount)
             {
-                var splitOutputPath = System.IO.Path.Combine(directory, $"{filenameWithoutExt}.part{i + 1}.pdf");
+                cancellationToken.ThrowIfCancellationRequested();
+                int endPage = Math.Min(pageCount, startPage + pagesPerPart - 1);
+                var splitOutputPath = System.IO.Path.Combine(directory, $"{outputStem}.part{partNumber}.pdf");
+                createdParts.Add(splitOutputPath);
 
-                // This is a simplified approach - in reality you'd need to extract page ranges
-                // For now, we'll just copy the file multiple times as placeholders
-                LogMessage($"Creating part {i + 1} of {numSplits}: {System.IO.Path.GetFileName(splitOutputPath)}");
+                WritePdfPageRange(inputPath, splitOutputPath, startPage, endPage);
+                long partSize = GetFileSize(splitOutputPath);
 
-                // Use GhostscriptAPI to split file by page ranges
-                await Task.Run(() =>
+                // Reduce the page range until the part fits. A single oversized page
+                // cannot be split further, so keep it and report that exception.
+                while (partSize > maxSplitSize && endPage > startPage)
                 {
-                    try
-                    {
-                        using (var gsApi = new GhostscriptAPI())
-                        {
-                            var startPage = i * 10 + 1; // Rough estimation: 10 pages per split
-                            var endPage = (i + 1) * 10;
-
-                            gsApi.SplitPdfByPageRange(inputPath, splitOutputPath, startPage, endPage);
-                            LogMessage($"Đã tạo phần {i + 1}: {System.IO.Path.GetFileName(splitOutputPath)}");
-                        }
-                    }
-                    catch (GhostscriptException gsEx)
-                    {
-                        LogMessage($"Lỗi Ghostscript API khi chia file: {gsEx.Message} (Error Code: {gsEx.ErrorCode})");
-
-                        // Fallback to process-based approach
-                        var ghostscriptPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Ghostscript", "gswin64c.exe");
-                        var startPage = i * 10 + 1; // Rough estimation: 10 pages per split
-                        var endPage = (i + 1) * 10;
-
-                        var arguments = $"-sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={startPage} -dLastPage={endPage} -sOutputFile=\"{splitOutputPath}\" \"{inputPath}\"";
-
-                        var process = new System.Diagnostics.Process();
-                        process.StartInfo.FileName = ghostscriptPath;
-                        process.StartInfo.Arguments = arguments;
-                        process.StartInfo.CreateNoWindow = true;
-                        process.StartInfo.UseShellExecute = false;
-                        process.Start();
-                        process.WaitForExit();
-
-                        LogMessage($"Đã tạo phần {i + 1} với phương pháp thay thế: {System.IO.Path.GetFileName(splitOutputPath)}");
-                    }
-                });
-
-                // Update progress for splitting
-                UpdateProgress(90 + (i * 10 / numSplits));
-            }
-
-            LogMessage("File splitting completed!");
-
-            this.Invoke(new Action(() =>
-            {
-                var result = MessageBox.Show(
-                    $"File đã được chia thành {numSplits} phần.\n\nCác phần được lưu với tên:\n{filenameWithoutExt}.part1.pdf\n{filenameWithoutExt}.part2.pdf\n...\n\nBạn có muốn mở thư mục kết quả không?",
-                    "Chia file hoàn tất",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Information);
-
-                if (result == DialogResult.Yes)
-                {
-                    OpenOutputFolder(directory);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    int currentPages = endPage - startPage + 1;
+                    int reducedPages = Math.Max(1, (int)Math.Floor(currentPages * (double)maxSplitSize / partSize));
+                    endPage = startPage + Math.Min(currentPages - 1, reducedPages) - 1;
+                    WritePdfPageRange(inputPath, splitOutputPath, startPage, endPage);
+                    partSize = GetFileSize(splitOutputPath);
                 }
-            }));
+
+                if (partSize <= 0)
+                {
+                    throw new InvalidOperationException($"Không tạo được phần PDF {partNumber}.");
+                }
+
+                if (partSize > maxSplitSize)
+                {
+                    LogMessage($"Phần {partNumber} chỉ có một trang nhưng vẫn lớn hơn giới hạn ({FormatFileSize(partSize)}).");
+                }
+                else
+                {
+                    LogMessage($"Đã tạo phần {partNumber}: trang {startPage}-{endPage}, {FormatFileSize(partSize)}.");
+                }
+
+                int pagesCreated = endPage - startPage + 1;
+                startPage = endPage + 1;
+                partNumber++;
+
+                if (partSize > 0)
+                {
+                    pagesPerPart = Math.Max(1, (int)Math.Floor(pagesCreated * (double)maxSplitSize / partSize));
+                }
+                UpdateProgress(Math.Min(99, 90 + (int)(9.0 * (startPage - 1) / pageCount)));
+            }
         }
-        catch (Exception ex)
+        catch
         {
-            LogMessage($"Error splitting file: {ex.Message}");
-            this.Invoke(new Action(() =>
+            foreach (var partPath in createdParts)
             {
-                MessageBox.Show($"Error splitting file: {ex.Message}", "Split Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }));
+                try { System.IO.File.Delete(partPath); } catch { }
+            }
+            throw;
+        }
+
+        LogMessage($"Chia file hoàn tất: {createdParts.Count} phần, đủ {pageCount} trang.");
+        InvokeOnUi(() =>
+        {
+            var result = MessageBox.Show(
+                $"File đã được chia thành {createdParts.Count} phần và đủ {pageCount} trang.\n\nBạn có muốn mở thư mục kết quả không?",
+                "Chia file hoàn tất",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information);
+
+            if (result == DialogResult.Yes)
+            {
+                OpenOutputFolder(directory);
+            }
+        });
+    }
+
+    private int GetPdfPageCount(string inputPath)
+    {
+        var qpdfPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Tools", "qpdf.exe");
+        if (System.IO.File.Exists(qpdfPath))
+        {
+            using var process = new System.Diagnostics.Process();
+            process.StartInfo.FileName = qpdfPath;
+            process.StartInfo.UseShellExecute = false;
+            process.StartInfo.CreateNoWindow = true;
+            process.StartInfo.RedirectStandardOutput = true;
+            process.StartInfo.RedirectStandardError = true;
+            process.StartInfo.ArgumentList.Add("--show-npages");
+            process.StartInfo.ArgumentList.Add(inputPath);
+            process.Start();
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            var errorTask = process.StandardError.ReadToEndAsync();
+            while (!process.WaitForExit(250))
+            {
+                if (isClosing)
+                {
+                    try { process.Kill(true); } catch { }
+                    throw new OperationCanceledException("Đã hủy thao tác đếm trang PDF.");
+                }
+            }
+            string output = outputTask.GetAwaiter().GetResult();
+            string error = errorTask.GetAwaiter().GetResult();
+            if (process.ExitCode == 0 && int.TryParse(output.Trim(), out int pageCount) && pageCount > 0)
+            {
+                return pageCount;
+            }
+            LogMessage($"qpdf không đếm được số trang: {error.Trim()}");
+        }
+
+        using var gsApi = new GhostscriptAPI();
+        int fallbackPageCount = gsApi.GetPdfPageCount(inputPath);
+        if (fallbackPageCount <= 0)
+        {
+            throw new InvalidDataException("Không xác định được số trang PDF.");
+        }
+        return fallbackPageCount;
+    }
+
+    private void WritePdfPageRange(string inputPath, string outputPath, int startPage, int endPage)
+    {
+        try { if (System.IO.File.Exists(outputPath)) System.IO.File.Delete(outputPath); } catch { }
+
+        try
+        {
+            using var gsApi = new GhostscriptAPI();
+            gsApi.SplitPdfByPageRange(inputPath, outputPath, startPage, endPage);
+        }
+        catch (GhostscriptException gsEx)
+        {
+            LogMessage($"Ghostscript API không chia được trang {startPage}-{endPage}: {gsEx.Message}. Dùng process fallback...");
+            var ghostscriptPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Ghostscript", "gswin64c.exe");
+            var arguments = $"-sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dFirstPage={startPage} -dLastPage={endPage} -sOutputFile=\"{outputPath}\" \"{inputPath}\"";
+            RunProcessOrThrow(ghostscriptPath, arguments, $"Ghostscript split {startPage}-{endPage}");
+        }
+
+        if (GetFileSize(outputPath) <= 0)
+        {
+            throw new InvalidOperationException($"Không tạo được PDF cho trang {startPage}-{endPage}.");
         }
     }
 
@@ -1246,19 +1753,9 @@ public partial class MainForm : Form
 
     private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
     {
-        // Clean up threads if form is closing during operations
-        if (isCompressionRunning && compressionThread != null && compressionThread.IsAlive)
-        {
-            // Thread.Abort() is obsolete, just let the thread complete naturally
-            // We set a flag to signal the thread to stop if needed
-            isCompressionRunning = false;
-        }
-
-        if (isMergeRunning && mergeThread != null && mergeThread.IsAlive)
-        {
-            // Set flag to signal the merge thread to stop
-            isMergeRunning = false;
-        }
+        isClosing = true;
+        compressionCancellation?.Cancel();
+        mergeCancellation?.Cancel();
     }
 
     private void MainForm_Load(object sender, EventArgs e)
@@ -1293,35 +1790,17 @@ public partial class MainForm : Form
         // Log to NLog with [MERGE] prefix
         Logger.InfoMainForm($"[MERGE] {message}");
 
-        // Also update UI if needed
-        if (mergeLogTextBox.InvokeRequired)
-        {
-            mergeLogTextBox.Invoke(new Action<string>(LogMergeMessage), message);
-            return;
-        }
-
-        // Add to UI
-        mergeLogTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\r\n");
+        InvokeOnUi(() => mergeLogTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\r\n"));
     }
 
     private void UpdateMergeProgress(int value)
     {
-        if (mergeProgressBar.InvokeRequired)
-        {
-            mergeProgressBar.Invoke(new Action<int>(UpdateMergeProgress), value);
-            return;
-        }
-        mergeProgressBar.Value = value;
+        InvokeOnUi(() => mergeProgressBar.Value = Math.Clamp(value, mergeProgressBar.Minimum, mergeProgressBar.Maximum));
     }
 
     private void UpdateMergeStatus(string status)
     {
-        if (mergeStatusLabel.InvokeRequired)
-        {
-            mergeStatusLabel.Invoke(new Action<string>(UpdateMergeStatus), status);
-            return;
-        }
-        mergeStatusLabel.Text = status;
+        InvokeOnUi(() => mergeStatusLabel.Text = status);
     }
 
     private void addPdfButton_Click(object sender, EventArgs e)
@@ -1463,6 +1942,11 @@ public partial class MainForm : Form
         saveMergeFileDialog.FileName = "merged.pdf";
         if (saveMergeFileDialog.ShowDialog() == DialogResult.OK)
         {
+            if (mergePdfFiles.Any(inputPath => PathsEqual(inputPath, saveMergeFileDialog.FileName)))
+            {
+                MessageBox.Show("File kết quả phải khác tất cả file PDF đầu vào.", "Đường dẫn không hợp lệ", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             StartMergeThread(saveMergeFileDialog.FileName);
         }
     }
@@ -1477,21 +1961,27 @@ public partial class MainForm : Form
         // Create a copy of the file list to avoid modification during merge
         var filesToMerge = new List<string>(mergePdfFiles);
 
-        mergeThread = new System.Threading.Thread(() => MergePdfThreaded(filesToMerge, outputPath));
-        mergeThread.IsBackground = true;
-        mergeThread.Start();
+        mergeCancellation?.Dispose();
+        mergeCancellation = new CancellationTokenSource();
+        var cancellationToken = mergeCancellation.Token;
+        mergeTask = Task.Run(() => MergePdfWorker(filesToMerge, outputPath, cancellationToken));
 
         LogMergeMessage("Bắt đầu gộp file PDF...");
         UpdateMergeStatus("Đang gộp...");
     }
 
-    private async void MergePdfThreaded(List<string> inputPaths, string outputPath)
+    private void MergePdfWorker(List<string> inputPaths, string outputPath, CancellationToken cancellationToken)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (inputPaths.Count < 2)
             {
                 throw new ArgumentException("At least 2 PDF files are required for merging");
+            }
+            if (inputPaths.Any(inputPath => PathsEqual(inputPath, outputPath)))
+            {
+                throw new InvalidOperationException("File kết quả phải khác tất cả file PDF đầu vào.");
             }
 
             LogMergeMessage($"Số lượng file cần gộp: {inputPaths.Count}");
@@ -1500,6 +1990,7 @@ public partial class MainForm : Form
             // Validate all input files exist
             foreach (string filePath in inputPaths)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (!System.IO.File.Exists(filePath))
                 {
                     throw new FileNotFoundException($"Input PDF file not found: {System.IO.Path.GetFileName(filePath)}", filePath);
@@ -1529,9 +2020,9 @@ public partial class MainForm : Form
                     LogMergeMessage("Gộp file thành công với Ghostscript API!");
 
                     // Verify output file was created
-                    if (!System.IO.File.Exists(outputPath))
+                    if (GetFileSize(outputPath) <= 0)
                     {
-                        throw new InvalidOperationException("Output file was not created");
+                        throw new InvalidOperationException("Output file was not created or is empty");
                     }
 
                     var outputSize = GetFileSize(outputPath);
@@ -1544,7 +2035,7 @@ public partial class MainForm : Form
                     UpdateMergeProgress(100);
 
                     // Update UI on main thread
-                    this.Invoke(new Action(() =>
+                    InvokeOnUi(() =>
                     {
                         UpdateMergeStatus("Gộp hoàn tất!");
 
@@ -1558,7 +2049,7 @@ public partial class MainForm : Form
                         {
                             OpenOutputFolder(outputPath);
                         }
-                    }));
+                    });
                 }
                 catch (GhostscriptException gsEx)
                 {
@@ -1568,31 +2059,35 @@ public partial class MainForm : Form
 
                     // Fallback to process-based approach
                     LogMergeMessage("Thử phương pháp thay thế...");
-                    await MergePdfWithProcess(inputPaths, outputPath);
+                    MergePdfWithProcess(inputPaths, outputPath);
                 }
             }
+        }
+        catch (OperationCanceledException)
+        {
+            LogMergeMessage("Đã hủy quá trình gộp PDF.");
         }
         catch (Exception ex)
         {
             LogMergeMessage($"Lỗi khi gộp file: {ex.Message}");
-            this.Invoke(new Action(() =>
+            InvokeOnUi(() =>
             {
                 UpdateMergeStatus("Gộp thất bại!");
                 MessageBox.Show($"Merge failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }));
+            });
         }
         finally
         {
-            this.Invoke(new Action(() =>
+            isMergeRunning = false;
+            InvokeOnUi(() =>
             {
-                isMergeRunning = false;
                 UpdateMergeButtonState();
                 mergeProgressBar.Visible = false;
-            }));
+            });
         }
     }
 
-    private async Task MergePdfWithProcess(List<string> inputPaths, string outputPath)
+    private void MergePdfWithProcess(List<string> inputPaths, string outputPath)
     {
         try
         {
@@ -1624,11 +2119,18 @@ public partial class MainForm : Form
             process.StartInfo.CreateNoWindow = true;
             process.StartInfo.UseShellExecute = false;
             process.Start();
-            await Task.Run(() => process.WaitForExit());
+            while (!process.WaitForExit(250))
+            {
+                if (isClosing)
+                {
+                    try { process.Kill(true); } catch { }
+                    throw new OperationCanceledException("Đã hủy quá trình gộp PDF.");
+                }
+            }
 
             UpdateMergeProgress(90);
 
-            if (process.ExitCode == 0 && System.IO.File.Exists(outputPath))
+            if (process.ExitCode == 0 && GetFileSize(outputPath) > 0)
             {
                 LogMergeMessage("Gộp file thành công với phương pháp thay thế!");
 
@@ -1640,7 +2142,7 @@ public partial class MainForm : Form
 
                 UpdateMergeProgress(100);
 
-                this.Invoke(new Action(() =>
+                InvokeOnUi(() =>
                 {
                     UpdateMergeStatus("Gộp hoànất!");
 
@@ -1654,7 +2156,7 @@ public partial class MainForm : Form
                     {
                         OpenOutputFolder(outputPath);
                     }
-                }));
+                });
             }
             else
             {

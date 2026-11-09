@@ -704,7 +704,11 @@ namespace PdfCompressor
             try
             {
                 // Method 1: Try using Ghostscript script
-                string script = $"({inputPath}) (r) file runpdfbegin pdfpagecount runpdfend == flush";
+                string escapedPath = inputPath
+                    .Replace("\\", "\\\\", StringComparison.Ordinal)
+                    .Replace("(", "\\(", StringComparison.Ordinal)
+                    .Replace(")", "\\)", StringComparison.Ordinal);
+                string script = $"({escapedPath}) (r) file runpdfbegin pdfpagecount runpdfend == flush";
                 Logger.InfoGhostscript($"Thực thi script đếm trang: {script}");
 
                 // Capture output using stdio callback
@@ -722,7 +726,10 @@ namespace PdfCompressor
 
                 ExecuteString(script);
 
-                if (int.TryParse(output.Trim(), out int pageCount))
+                var pageCountToken = output
+                    .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+                    .LastOrDefault(token => int.TryParse(token, out _));
+                if (int.TryParse(pageCountToken, out int pageCount) && pageCount > 0)
                 {
                     Logger.LogGhostscriptOperationSuccess("đếm trang PDF", $"{pageCount} trang");
                     return pageCount;
@@ -737,10 +744,7 @@ namespace PdfCompressor
                 Logger.LogGhostscriptError("đếm trang PDF", -1, $"{ex.Message} - Sử dụng giá trị mặc định");
             }
 
-            // Fallback method: Return a reasonable default
-            // In a production environment, you'd want to implement proper page counting
-            Logger.InfoGhostscript("Sử dụng giá trị mặc định: 10 trang");
-            return 10; // Default fallback for page count
+            throw new GhostscriptException("Không xác định được số trang PDF.", -1);
         }
 
         #endregion
@@ -756,7 +760,7 @@ namespace PdfCompressor
                 "-dBATCH",
                 "-dQUIET",
                 "-sDEVICE=pdfwrite",
-                $"-dCompatibilityLevel=1.4",
+                "-dCompatibilityLevel=1.5",
                 $"-dPDFSETTINGS={settings.PdfSetting}",
                 // Extra optimization flags (inspired by FileOptimizer pipeline)
                 "-dSAFER",
@@ -765,17 +769,50 @@ namespace PdfCompressor
                 "-dDetectDuplicateImages=true",
                 "-dAutoRotatePages=/None",
                 "-dOptimize=true",
-                "-dConvertCMYKImagesToRGB=true",
-                "-dColorConversionStrategy=/sRGB",
                 "-dPrinted=false",
                 $"-sOutputFile={outputPath}"
             };
 
-            if (settings.ColorImageResolution > 0)
-                args.Add($"-dColorImageResolution={settings.ColorImageResolution}");
+            if (settings.ConvertToGray)
+            {
+                args.Add("-dColorConversionStrategy=/Gray");
+                args.Add("-dProcessColorModel=/DeviceGray");
+            }
+            else
+            {
+                args.Add("-dConvertCMYKImagesToRGB=true");
+                args.Add($"-dColorConversionStrategy={settings.ColorConversionStrategy}");
+            }
 
-            if (settings.GrayImageResolution > 0)
+            if (!settings.PassThroughJPEGImages)
+            {
+                args.Add("-dPassThroughJPEGImages=false");
+            }
+
+            if (settings.DownsampleColorImages && settings.ColorImageResolution > 0)
+            {
+                args.Add("-dDownsampleColorImages=true");
+                args.Add($"-dColorImageDownsampleType={settings.DownsampleType}");
+                args.Add($"-dColorImageResolution={settings.ColorImageResolution}");
+                args.Add($"-dColorImageDownsampleThreshold={settings.DownsampleThreshold:F1}");
+            }
+
+            if (settings.DownsampleGrayImages && settings.GrayImageResolution > 0)
+            {
+                args.Add("-dDownsampleGrayImages=true");
+                args.Add($"-dGrayImageDownsampleType={settings.DownsampleType}");
                 args.Add($"-dGrayImageResolution={settings.GrayImageResolution}");
+                args.Add($"-dGrayImageDownsampleThreshold={settings.DownsampleThreshold:F1}");
+            }
+
+            if (settings.DownsampleMonoImages && settings.MonoImageResolution > 0)
+            {
+                args.Add("-dDownsampleMonoImages=true");
+                args.Add("-dMonoImageDownsampleType=/Subsample");
+                args.Add($"-dMonoImageResolution={settings.MonoImageResolution}");
+                args.Add($"-dMonoImageDownsampleThreshold={settings.DownsampleThreshold:F1}");
+                args.Add("-dMonoImageFilter=/CCITTFaxEncode");
+            }
 
             if (settings.JpegQuality > 0)
                 args.Add($"-dJPEGQ={settings.JpegQuality}");
@@ -794,11 +831,9 @@ namespace PdfCompressor
                 args.Add("-dGrayImageFilter=/DCTEncode");
             }
 
-            if (settings.DownsampleColorImages)
-                args.Add("-dDownsampleColorImages=true");
-
-            if (settings.DownsampleGrayImages)
-                args.Add("-dDownsampleGrayImages=true");
+            args.Add("-dEncodeColorImages=true");
+            args.Add("-dEncodeGrayImages=true");
+            args.Add("-dEncodeMonoImages=true");
 
             args.Add(inputPath);
 
@@ -915,6 +950,13 @@ namespace PdfCompressor
         public bool UseDCTEncode { get; set; } = false;
         public bool DownsampleColorImages { get; set; } = false;
         public bool DownsampleGrayImages { get; set; } = false;
+        public bool DownsampleMonoImages { get; set; } = false;
+        public int MonoImageResolution { get; set; } = 300;
+        public string DownsampleType { get; set; } = "/Bicubic";
+        public double DownsampleThreshold { get; set; } = 1.0;
+        public bool PassThroughJPEGImages { get; set; } = false;
+        public string ColorConversionStrategy { get; set; } = "/sRGB";
+        public bool ConvertToGray { get; set; } = false;
     }
 
     /// <summary>
