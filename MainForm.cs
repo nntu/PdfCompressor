@@ -12,6 +12,8 @@ public partial class MainForm : Form
     private CancellationTokenSource? compressionCancellation;
     private volatile bool isCompressionRunning = false;
     private volatile bool isClosing = false;
+    private bool? cachedHasColor = null;
+    private CancellationTokenSource? fileAnalysisCancellation;
 
     // External PDF optimization tools (optional; user can provide them)
     private const string CompressionTypeLossless = "Lossless tối ưu (mutool + qpdf)";
@@ -147,7 +149,7 @@ public partial class MainForm : Form
         {
             if (InvokeRequired)
             {
-                Invoke(action);
+                BeginInvoke(action);
             }
             else
             {
@@ -178,30 +180,68 @@ public partial class MainForm : Form
         if (openFileDialog.ShowDialog() == DialogResult.OK)
         {
             selectedPdfPath = openFileDialog.FileName;
-            statusLabel.Text = $"Selected file: {selectedPdfPath}";
+            cachedHasColor = null;
+            var currentPath = selectedPdfPath;
+
+            statusLabel.Text = $"Đã chọn file: {System.IO.Path.GetFileName(currentPath)}";
             compressFileButton.Enabled = true;
 
             // Auto-generate output filename with .compress.pdf suffix
-            var directory = System.IO.Path.GetDirectoryName(selectedPdfPath) ?? "";
-            var filenameWithoutExt = System.IO.Path.GetFileNameWithoutExtension(selectedPdfPath) ?? "";
+            var directory = System.IO.Path.GetDirectoryName(currentPath) ?? "";
+            var filenameWithoutExt = System.IO.Path.GetFileNameWithoutExtension(currentPath) ?? "";
             var outputPath = System.IO.Path.Combine(directory, $"{filenameWithoutExt}.compress.pdf");
             saveFileDialog.FileName = outputPath;
 
-            LogMessage($"Đã tải file: {System.IO.Path.GetFileName(selectedPdfPath) ?? "Không xác định"}");
-            LogMessage($"Kích thước file: {FormatFileSize(GetFileSize(selectedPdfPath ?? ""))}");
+            long fileSize = GetFileSize(currentPath);
+            LogMessage($"Đã tải file: {System.IO.Path.GetFileName(currentPath)}");
+            LogMessage($"Kích thước file: {FormatFileSize(fileSize)}");
 
-            // Analyze document type
-            var documentType = AnalyzeDocumentType(selectedPdfPath ?? "");
-            textBoxDocumentType.Text = documentType;
-            LogMessage($"Loại tài liệu phát hiện: {documentType}");
+            textBoxDocumentType.Text = "Đang phân tích...";
 
-            if (string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase))
+            // Cancel any previous file analysis task
+            fileAnalysisCancellation?.Cancel();
+            fileAnalysisCancellation?.Dispose();
+            fileAnalysisCancellation = new CancellationTokenSource();
+            var ct = fileAnalysisCancellation.Token;
+
+            // Run document analysis asynchronously in background so UI never freezes!
+            Task.Run(() =>
             {
-                bool hasColor = DetectDocumentHasColor(selectedPdfPath ?? "");
-                LogMessage(hasColor
-                    ? "Kiểm tra màu scan: Có màu (phát hiện con dấu / chữ ký)."
-                    : "Kiểm tra màu scan: Đen trắng / đơn sắc (không có màu).");
-            }
+                try
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var documentType = AnalyzeDocumentType(currentPath);
+                    bool hasColor = true;
+                    if (string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasColor = DetectDocumentHasColor(currentPath);
+                        cachedHasColor = hasColor;
+                    }
+
+                    if (!ct.IsCancellationRequested)
+                    {
+                        InvokeOnUi(() =>
+                        {
+                            if (PathsEqual(selectedPdfPath ?? "", currentPath))
+                            {
+                                textBoxDocumentType.Text = documentType;
+                                LogMessage($"Loại tài liệu phát hiện: {documentType}");
+                                if (string.Equals(documentType, "Scanned Document", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    LogMessage(hasColor
+                                        ? "Kiểm tra màu scan: Có màu sắc (phát hiện con dấu / chữ ký)."
+                                        : "Kiểm tra màu scan: Đen trắng / đơn sắc (không có màu).");
+                                }
+                            }
+                        });
+                    }
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex)
+                {
+                    Logger.ErrorMainForm($"Lỗi phân tích tài liệu: {ex.Message}");
+                }
+            }, ct);
         }
     }
 
@@ -266,7 +306,11 @@ public partial class MainForm : Form
         compressionSettings.DocumentType = textBoxDocumentType.Text;
 
         isCompressionRunning = true;
+        selectFileButton.Enabled = false;
         compressFileButton.Enabled = false;
+        comboBoxCompressionType.Enabled = false;
+        comboBoxScanColorMode.Enabled = false;
+        trackBarImageQuality.Enabled = false;
         progressBar.Visible = true;
         progressBar.Value = 0;
 
@@ -314,6 +358,13 @@ public partial class MainForm : Form
             var enableSplitting = settings.EnableSplitting;
             var maxSplitSizeMB = settings.MaxSplitSizeMB;
             var documentType = settings.DocumentType;
+            if (string.Equals(documentType, "Đang phân tích...", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(documentType, "Chưa phân tích", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(documentType))
+            {
+                documentType = AnalyzeDocumentType(inputPath);
+                InvokeOnUi(() => textBoxDocumentType.Text = documentType);
+            }
 
             bool isScanPreset = compressionType == CompressionTypeScanSuper ||
                                 compressionType == CompressionTypeScanBalanced ||
@@ -709,20 +760,24 @@ public partial class MainForm : Form
             isCompressionRunning = false;
             InvokeOnUi(() =>
             {
+                selectFileButton.Enabled = true;
                 compressFileButton.Enabled = true;
+                comboBoxCompressionType.Enabled = true;
+                comboBoxScanColorMode.Enabled = checkBoxOptimizeForScanned.Checked;
+                trackBarImageQuality.Enabled = true;
                 progressBar.Visible = false;
             });
         }
     }
 
-    private void RunMutoolClean(string mutoolPath, string inputPdf, string outputPdf)
+    private void RunMutoolClean(string mutoolPath, string inputPdf, string outputPdf, CancellationToken cancellationToken = default)
     {
         // mutool clean -g -z "in" "out"
         var args = $"clean -g -z \"{inputPdf}\" \"{outputPdf}\"";
-        RunProcessOrThrow(mutoolPath, args, "mutool clean");
+        RunProcessOrThrow(mutoolPath, args, "mutool clean", cancellationToken);
     }
 
-    private void RunQpdfOptimize(string qpdfPath, string inputPdf, string outputPdf)
+    private void RunQpdfOptimize(string qpdfPath, string inputPdf, string outputPdf, CancellationToken cancellationToken = default)
     {
         // qpdf "in" --compress-streams=y --decode-level=generalized --recompress-flate --compression-level=9 --optimize-images --object-streams=generate "out"
         var args =
@@ -734,10 +789,10 @@ public partial class MainForm : Form
             "--optimize-images " +
             "--object-streams=generate " +
             $"\"{outputPdf}\"";
-        RunProcessOrThrow(qpdfPath, args, "qpdf optimize");
+        RunProcessOrThrow(qpdfPath, args, "qpdf optimize", cancellationToken);
     }
 
-    private void RunProcessOrThrow(string exePath, string arguments, string label)
+    private void RunProcessOrThrow(string exePath, string arguments, string label, CancellationToken cancellationToken = default)
     {
         var process = new System.Diagnostics.Process();
         process.StartInfo.FileName = exePath;
@@ -771,25 +826,24 @@ public partial class MainForm : Form
         process.Start();
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
-        while (!process.WaitForExit(250))
+        while (!process.WaitForExit(200))
         {
-            if (isClosing)
+            if (isClosing || cancellationToken.IsCancellationRequested)
             {
                 try { process.Kill(true); } catch { }
-                throw new OperationCanceledException($"Đã hủy {label} vì ứng dụng đang đóng.");
+                throw new OperationCanceledException($"Đã hủy {label}.");
             }
         }
-        // Ensure asynchronous stdout/stderr handlers have drained.
-        process.WaitForExit();
+        process.WaitForExit(1000);
 
         string stdout = stdoutBuffer.ToString();
         string stderr = stderrBuffer.ToString();
 
-        if (!string.IsNullOrWhiteSpace(stdout))
+        if (!string.IsNullOrWhiteSpace(stdout) && stdout.Length < 1000)
         {
             LogMessage($"{label} stdout: {stdout.Trim()}");
         }
-        if (!string.IsNullOrWhiteSpace(stderr))
+        if (!string.IsNullOrWhiteSpace(stderr) && stderr.Length < 1000)
         {
             LogMessage($"{label} stderr: {stderr.Trim()}");
         }
@@ -916,42 +970,9 @@ public partial class MainForm : Form
             LogMessage($"Bước 1: Ghostscript tái cấu trúc scan (DPI: {optimalSettings.ColorImageResolution}, Bicubic, JPEG-Q: {optimalSettings.JpegQuality}%, {colorDesc})...");
             UpdateProgress(35);
 
-            // Execute Ghostscript (API or process fallback)
-            try
-            {
-                if (!GhostscriptAPI.IsGhostscriptAvailable())
-                {
-                    throw new GhostscriptException("Ghostscript DLL not available", -1);
-                }
-
-                using var gsApi = new GhostscriptAPI();
-                var compressionSettings = new PdfCompressionSettings
-                {
-                    PdfSetting = optimalSettings.PdfSetting,
-                    ColorImageResolution = optimalSettings.ColorImageResolution,
-                    GrayImageResolution = optimalSettings.GrayImageResolution,
-                    MonoImageResolution = optimalSettings.MonoImageResolution,
-                    JpegQuality = optimalSettings.JpegQuality,
-                    UseAutoFilter = optimalSettings.UseAutoFilter,
-                    UseDCTEncode = optimalSettings.UseDCTEncode,
-                    DownsampleColorImages = optimalSettings.DownsampleColorImages,
-                    DownsampleGrayImages = optimalSettings.DownsampleGrayImages,
-                    DownsampleMonoImages = optimalSettings.DownsampleMonoImages,
-                    DownsampleType = optimalSettings.DownsampleType,
-                    DownsampleThreshold = optimalSettings.DownsampleThreshold,
-                    PassThroughJPEGImages = optimalSettings.PassThroughJPEGImages,
-                    ConvertToGray = optimalSettings.ConvertToGray
-                };
-
-                gsApi.CompressPdf(inputPath, tmpGsOut, compressionSettings);
-            }
-            catch (GhostscriptException gsEx)
-            {
-                string errorMsg = GhostscriptAPI.GetErrorMessage(gsEx.ErrorCode);
-                LogMessage($"Ghostscript API: {errorMsg} -> Chuyển sang Ghostscript process...");
-                var arguments = BuildIntelligentGhostscriptArguments(inputPath, tmpGsOut, optimalSettings, true);
-                RunProcessOrThrow(ghostscriptPath, arguments, "Ghostscript (process)");
-            }
+            // Execute Ghostscript process directly: isolated, fast, immune to native DLL thread lock
+            var arguments = BuildIntelligentGhostscriptArguments(inputPath, tmpGsOut, optimalSettings, true);
+            RunProcessOrThrow(ghostscriptPath, arguments, "Ghostscript (process)", cancellationToken);
 
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -969,12 +990,13 @@ public partial class MainForm : Form
 
                 try
                 {
-                    RunProcessOrThrow(mutoolPath, mutoolArgs, "mutool clean + jbig2");
+                    RunProcessOrThrow(mutoolPath, mutoolArgs, "mutool clean + jbig2", cancellationToken);
                     if (System.IO.File.Exists(tmpMutoolOut) && GetFileSize(tmpMutoolOut) > 0)
                     {
                         currentIntermediate = tmpMutoolOut;
                     }
                 }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
                     LogMessage($"Bỏ qua bước mutool (lỗi: {ex.Message}), tiếp tục với kết quả Ghostscript.");
@@ -988,7 +1010,7 @@ public partial class MainForm : Form
             {
                 LogMessage("Bước 3: qpdf tối ưu hóa luồng đối tượng (Object Streams)...");
                 UpdateProgress(85);
-                RunQpdfOptimize(qpdfPath, currentIntermediate, outputPath);
+                RunQpdfOptimize(qpdfPath, currentIntermediate, outputPath, cancellationToken);
             }
             else
             {
@@ -1010,55 +1032,26 @@ public partial class MainForm : Form
         string inputPath,
         string outputPath,
         CompressionSettings optimalSettings,
-        bool optimizeForScanned)
+        bool optimizeForScanned,
+        CancellationToken cancellationToken = default)
     {
         UpdateProgress(50);
-        LogMessage("Sử dụng Ghostscript API để nén file...");
-        UpdateProgress(60);
+        LogMessage("Bắt đầu nén với Ghostscript...");
 
-        try
-        {
-            if (!GhostscriptAPI.IsGhostscriptAvailable())
-            {
-                throw new GhostscriptException("Ghostscript DLL not available", -1);
-            }
+        var arguments = BuildIntelligentGhostscriptArguments(inputPath, outputPath, optimalSettings, optimizeForScanned);
+        RunProcessOrThrow(ghostscriptPath, arguments, "Ghostscript", cancellationToken);
 
-            using var gsApi = new GhostscriptAPI();
-            var compressionSettings = new PdfCompressionSettings
-            {
-                PdfSetting = optimalSettings.PdfSetting,
-                ColorImageResolution = optimalSettings.ColorImageResolution,
-                GrayImageResolution = optimalSettings.GrayImageResolution,
-                MonoImageResolution = optimalSettings.MonoImageResolution,
-                JpegQuality = optimalSettings.JpegQuality,
-                UseAutoFilter = optimalSettings.UseAutoFilter,
-                UseDCTEncode = optimalSettings.UseDCTEncode,
-                DownsampleColorImages = optimalSettings.DownsampleColorImages,
-                DownsampleGrayImages = optimalSettings.DownsampleGrayImages,
-                DownsampleMonoImages = optimalSettings.DownsampleMonoImages,
-                DownsampleType = optimalSettings.DownsampleType,
-                DownsampleThreshold = optimalSettings.DownsampleThreshold,
-                PassThroughJPEGImages = optimalSettings.PassThroughJPEGImages,
-                ConvertToGray = optimalSettings.ConvertToGray
-            };
-
-            gsApi.CompressPdf(inputPath, outputPath, compressionSettings);
-            UpdateProgress(90);
-            LogMessage("Nén file thành công với Ghostscript API!");
-        }
-        catch (GhostscriptException gsEx)
-        {
-            string errorMsg = GhostscriptAPI.GetErrorMessage(gsEx.ErrorCode);
-            LogMessage($"Lỗi Ghostscript API: {errorMsg}. Chuyển sang Ghostscript process...");
-            var arguments = BuildIntelligentGhostscriptArguments(inputPath, outputPath, optimalSettings, optimizeForScanned);
-            RunProcessOrThrow(ghostscriptPath, arguments, "Ghostscript (process)");
-            UpdateProgress(90);
-            LogMessage("Nén file thành công với phương pháp thay thế!");
-        }
+        UpdateProgress(90);
+        LogMessage("Nén file thành công với Ghostscript!");
     }
 
     private bool DetectDocumentHasColor(string filePath)
     {
+        if (cachedHasColor.HasValue)
+        {
+            return cachedHasColor.Value;
+        }
+
         try
         {
             var mutoolPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Tools", "mutool.exe");
@@ -1070,7 +1063,7 @@ public partial class MainForm : Form
                 process.StartInfo.CreateNoWindow = true;
                 process.StartInfo.UseShellExecute = false;
                 process.StartInfo.RedirectStandardOutput = true;
-                process.StartInfo.RedirectStandardError = true;
+                process.StartInfo.RedirectStandardError = false; // Prevent pipe deadlock
                 process.Start();
 
                 var outputTask = process.StandardOutput.ReadToEndAsync();
@@ -1083,11 +1076,13 @@ public partial class MainForm : Form
                             info.Contains("DeviceCMYK", StringComparison.OrdinalIgnoreCase) ||
                             info.Contains("ICCBased", StringComparison.OrdinalIgnoreCase))
                         {
+                            cachedHasColor = true;
                             return true;
                         }
                         if (info.Contains("DeviceGray", StringComparison.OrdinalIgnoreCase) ||
                             info.Contains("1bpc", StringComparison.OrdinalIgnoreCase))
                         {
+                            cachedHasColor = false;
                             return false;
                         }
                     }
@@ -1100,8 +1095,10 @@ public partial class MainForm : Form
 
             // Fallback: check sample of file
             var sample = ReadPdfSample(filePath);
-            return sample.Contains("/DeviceRGB", StringComparison.Ordinal) ||
-                   sample.Contains("/DeviceCMYK", StringComparison.Ordinal);
+            bool hasColor = sample.Contains("/DeviceRGB", StringComparison.Ordinal) ||
+                            sample.Contains("/DeviceCMYK", StringComparison.Ordinal);
+            cachedHasColor = hasColor;
+            return hasColor;
         }
         catch
         {
@@ -1288,23 +1285,29 @@ public partial class MainForm : Form
         // Check for common indicators of scanned documents
         var fileSize = GetFileSize(filePath);
 
-        // Large file size with limited text content suggests scanned images
-        if (fileSize > 5 * 1024 * 1024) // > 5MB
-        {
-            // Count text operators in PDF
-            var textOperatorCount = CountOccurrences(pdfContent, "BT") + CountOccurrences(pdfContent, "Tj");
-            var imageOperatorCount = CountOccurrences(pdfContent, "BI") + CountOccurrences(pdfContent, "ID");
+        // Count text and image indicators
+        var textOperatorCount = CountOccurrences(pdfContent, "BT") + CountOccurrences(pdfContent, "Tj");
+        var inlineImageCount = CountOccurrences(pdfContent, "BI") + CountOccurrences(pdfContent, "ID");
+        var xobjectImageCount = CountOccurrences(pdfContent, "/Subtype /Image") + CountOccurrences(pdfContent, "/Subtype/Image");
+        var imageCount = inlineImageCount + xobjectImageCount;
 
-            // If more image operators than text operators, likely scanned
-            if (imageOperatorCount > textOperatorCount * 2)
-            {
-                return true;
-            }
+        // If file has images and very little/no text, it's a scanned document
+        if (imageCount > 0 && textOperatorCount < 20)
+        {
+            return true;
+        }
+
+        // Large file size with limited text content suggests scanned images
+        if (fileSize > 3 * 1024 * 1024 && imageCount > textOperatorCount * 2)
+        {
+            return true;
         }
 
         // Check for scan-related metadata
-        if (pdfContent.Contains("Scanner") || pdfContent.Contains("Scan") ||
-            pdfContent.Contains("TWAIN") || pdfContent.Contains("WIA"))
+        if (pdfContent.Contains("Scanner", StringComparison.OrdinalIgnoreCase) ||
+            pdfContent.Contains("Scan", StringComparison.OrdinalIgnoreCase) ||
+            pdfContent.Contains("TWAIN", StringComparison.OrdinalIgnoreCase) ||
+            pdfContent.Contains("WIA", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
@@ -2059,7 +2062,7 @@ public partial class MainForm : Form
 
                     // Fallback to process-based approach
                     LogMergeMessage("Thử phương pháp thay thế...");
-                    MergePdfWithProcess(inputPaths, outputPath);
+                    MergePdfWithProcess(inputPaths, outputPath, cancellationToken);
                 }
             }
         }
@@ -2087,7 +2090,7 @@ public partial class MainForm : Form
         }
     }
 
-    private void MergePdfWithProcess(List<string> inputPaths, string outputPath)
+    private void MergePdfWithProcess(List<string> inputPaths, string outputPath, CancellationToken cancellationToken)
     {
         try
         {
@@ -2121,7 +2124,7 @@ public partial class MainForm : Form
             process.Start();
             while (!process.WaitForExit(250))
             {
-                if (isClosing)
+                if (isClosing || cancellationToken.IsCancellationRequested)
                 {
                     try { process.Kill(true); } catch { }
                     throw new OperationCanceledException("Đã hủy quá trình gộp PDF.");
